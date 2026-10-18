@@ -9,11 +9,14 @@ import 'auth_screen.dart';
 import '../services/location_service.dart';
 import '../services/ph_address_service.dart';
 
-/// AquaDirect location flow: finding -> confirm.
+/// AquaDirect location flow: finding -> found (or failed).
 ///
-/// The OS permission prompt is shown once, automatically, as soon as the
-/// screen opens. The device position is then found and confirmed without any
-/// button presses. Put this file at lib/customer/location_flow_screen.dart.
+/// The customer never picks a spot on the map. The OS permission prompt is
+/// shown once, automatically, when the screen opens. The device GPS is then
+/// tracked live: the pin appears on the first reading and sharpens every
+/// second or two until it is accurate enough (or the wait runs out).
+///
+/// Put this file at lib/customer/location_flow_screen.dart.
 class LocationFlowScreen extends StatefulWidget {
   const LocationFlowScreen({
     super.key,
@@ -28,6 +31,8 @@ class LocationFlowScreen extends StatefulWidget {
   final ValueChanged<String>? onComplete;
   final ValueChanged<DeliveryLocation>? onLocationSelected;
   final VoidCallback? onSkip;
+
+  /// Ignored. Kept only so existing callers still compile.
   final Future<String?> Function()? findLocation;
   final bool browsingOnly;
 
@@ -39,7 +44,7 @@ class LocationFlowScreen extends StatefulWidget {
   State<LocationFlowScreen> createState() => _LocationFlowScreenState();
 }
 
-enum _Stage { finding, found }
+enum _Stage { finding, found, failed }
 
 /// Real progress of the finding step (not a timer).
 enum _FindPhase { permission, position }
@@ -61,6 +66,23 @@ const _muted = Color(0xFF6B7F9A);
 const _line = Color(0xFFE4EDF6);
 const _surface = Color(0xFFF7FAFD);
 const _green = Color(0xFF12B981);
+
+// ------------------------------------------------------ accuracy tuning (m)
+
+/// Stop refining as soon as a reading is this accurate.
+const _targetAccuracy = 25.0;
+
+/// Above this we warn the customer that the pin is only approximate.
+const _approximateAccuracy = 100.0;
+
+/// Above this, Continue is blocked until the pin gets more precise.
+const _maxUsableAccuracy = 150.0;
+
+/// Longest we keep sharpening the pin before settling on the best reading.
+const _maxRefineWait = Duration(seconds: 25);
+
+const _genericFailure =
+    'We couldn’t get your location. Check that location is on, then try again.';
 
 TextStyle _t(
   double size, {
@@ -115,16 +137,16 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
 
   double? latitude;
   double? longitude;
-  double? deviceLatitude;
-  double? deviceLongitude;
-  bool pinAdjusted = false;
-  bool pinConfirmed = false;
+
+  /// Accuracy of the current reading in meters (from the device GPS).
+  double? accuracy;
+
+  /// True while the GPS is still sharpening the pin.
   bool refining = false;
 
   bool loadingProvinces = true;
   bool loadingCities = false;
   bool loadingBarangays = false;
-  bool locatingSelectedArea = false;
   List<PhilippineDivision> provinces = const [];
   List<PhilippineDivision> cities = const [];
   List<PhilippineDivision> barangays = const [];
@@ -133,17 +155,19 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
   String? barangayCode;
   String? addressFormError;
   String? divisionLoadError;
-  String? areaLookupError;
 
   int areaLookupRequest = 0;
-  int mapVersion = 0;
   int findRequest = 0;
   int coverageRequest = 0;
+  double? coverageLat;
+  double? coverageLng;
   String? toastMessage;
   bool toastVisible = false;
   Timer? toastTimer;
   bool slowFinding = false;
   Timer? slowTimer;
+  Timer? settleTimer;
+  StreamSubscription<DeliveryLocation>? locationSub;
   _Coverage coverage = const _Coverage.idle();
 
   final addressLineController = TextEditingController();
@@ -153,13 +177,6 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
       const PhilippineAddressService();
 
   bool get located => latitude != null && longitude != null;
-  bool get addressReady =>
-      located &&
-      pinConfirmed &&
-      selectedProvince != null &&
-      selectedCity != null &&
-      selectedBarangay != null &&
-      addressLineController.text.trim().isNotEmpty;
 
   @override
   void initState() {
@@ -177,6 +194,8 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
     WidgetsBinding.instance.removeObserver(this);
     slowTimer?.cancel();
     toastTimer?.cancel();
+    settleTimer?.cancel();
+    unawaited(locationSub?.cancel());
     addressLineController.dispose();
     addressLineFocus.dispose();
     super.dispose();
@@ -187,8 +206,7 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed &&
-        stage == _Stage.found &&
-        !located &&
+        stage == _Stage.failed &&
         failureAction != LocationFailureAction.none) {
       unawaited(startFinding());
     }
@@ -268,9 +286,7 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
       barangays = const [];
       loadingCities = true;
       loadingBarangays = false;
-      locatingSelectedArea = false;
       divisionLoadError = null;
-      areaLookupError = null;
       addressFormError = null;
     });
     try {
@@ -299,9 +315,7 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
       barangayCode = null;
       barangays = const [];
       loadingBarangays = true;
-      locatingSelectedArea = false;
       divisionLoadError = null;
-      areaLookupError = null;
       addressFormError = null;
     });
     try {
@@ -320,66 +334,27 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
     }
   }
 
-  Future<void> _selectBarangay(String? code) async {
+  /// The dropdowns only describe the address in words. They never move the
+  /// pin, which always comes from the device GPS.
+  void _selectBarangay(String? code) {
     if (code == null) return;
     setState(() {
       barangayCode = code;
       addressFormError = null;
-      areaLookupError = null;
     });
-    // A confirmed pin (from the device or the customer) is never moved by the
-    // dropdowns. Only an empty map is centered on the chosen barangay.
-    if (!pinConfirmed) await _centerPinOnSelectedArea();
-  }
-
-  Future<void> _centerPinOnSelectedArea() async {
-    final barangay = selectedBarangay;
-    final city = selectedCity;
-    final province = selectedProvince;
-    if (barangay == null || city == null || province == null) return;
-    final request = ++areaLookupRequest;
-    setState(() {
-      locatingSelectedArea = true;
-      areaLookupError = null;
-    });
-    try {
-      final area = await addressService.findAdministrativeArea(
-        barangay: barangay,
-        city: city,
-        province: province,
-      );
-      if (!mounted || request != areaLookupRequest) return;
-      if (area == null) {
-        setState(() {
-          locatingSelectedArea = false;
-          areaLookupError =
-              'We couldn’t center the map on this barangay. Tap the map at your delivery point to set the pin.';
-        });
-        return;
-      }
-      setState(() {
-        latitude = area.latitude;
-        longitude = area.longitude;
-        locatingSelectedArea = false;
-        mapVersion++;
-      });
-    } on Exception {
-      if (!mounted || request != areaLookupRequest) return;
-      setState(() {
-        locatingSelectedArea = false;
-        areaLookupError =
-            'The map search failed. Tap the map at your delivery point to set the pin.';
-      });
-    }
   }
 
   // ---------------------------------------------------------------- finding
 
-  /// Asks for permission (once, via the OS prompt), gets a quick position,
-  /// shows the pin right away, then refines it quietly in the background.
+  /// Asks for permission (once, via the OS prompt), then follows the device
+  /// GPS. The pin appears on the first reading and keeps sharpening until it
+  /// is accurate enough or [_maxRefineWait] runs out.
   Future<void> startFinding() async {
     final request = ++findRequest;
     slowTimer?.cancel();
+    await _stopTracking();
+    if (!mounted || request != findRequest) return;
+
     setState(() {
       stage = _Stage.finding;
       findPhase = _FindPhase.permission;
@@ -387,11 +362,12 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
       failureAction = LocationFailureAction.none;
       latitude = null;
       longitude = null;
-      pinConfirmed = false;
-      pinAdjusted = false;
+      accuracy = null;
       refining = false;
       slowFinding = false;
       coverage = const _Coverage.idle();
+      coverageLat = null;
+      coverageLng = null;
     });
     slowTimer = Timer(const Duration(seconds: 8), () {
       if (mounted && request == findRequest && stage == _Stage.finding) {
@@ -399,145 +375,117 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
       }
     });
 
-    if (widget.findLocation != null) {
-      await _legacyFind(request);
-      return;
-    }
-
-    DeliveryLocation? quick;
-    String? failure;
-    var action = LocationFailureAction.none;
     try {
       await locationService.ensurePermission();
-      if (!mounted || request != findRequest) return;
-      setState(() => findPhase = _FindPhase.position);
-      quick = await locationService.quickFix().timeout(
-        const Duration(seconds: 20),
-      );
     } on LocationServiceException catch (exception) {
-      failure = exception.message;
-      action = exception.action;
-    } on TimeoutException {
-      failure =
-          'Finding your location took too long. Choose it on the map, or try again.';
+      _fail(request, exception.message, exception.action);
+      return;
     } on Exception {
-      failure = 'We couldn’t get your location. Choose it on the map instead.';
-    }
-
-    if (!mounted || request != findRequest) return;
-    slowTimer?.cancel();
-    final lat = quick?.latitude;
-    final lng = quick?.longitude;
-    if (lat == null || lng == null) {
-      setState(() {
-        stage = _Stage.found;
-        failureAction = action;
-        error =
-            failure ??
-            'We couldn’t get your location. Choose it on the map instead.';
-        slowFinding = false;
-      });
+      _fail(request, _genericFailure, LocationFailureAction.none);
       return;
     }
-
-    setState(() {
-      latitude = lat;
-      longitude = lng;
-      deviceLatitude = lat;
-      deviceLongitude = lng;
-      pinConfirmed = true;
-      pinAdjusted = false;
-      stage = _Stage.found;
-      slowFinding = false;
-      mapVersion++;
-    });
-    _toast('Location confirmed');
-    unawaited(runCoverageCheck());
-    unawaited(_refineLocation(request));
-  }
-
-  /// Old behaviour for callers that pass their own [findLocation] hook.
-  Future<void> _legacyFind(int request) async {
-    String? found;
-    String? failure;
-    try {
-      found = await widget.findLocation!().timeout(const Duration(seconds: 30));
-    } on TimeoutException {
-      failure = 'Finding your address took too long. Enter it manually.';
-    } on Exception {
-      failure = 'We couldn’t get your location. Enter your address manually.';
-    }
     if (!mounted || request != findRequest) return;
-    slowTimer?.cancel();
-    final cleaned = found?.trim();
-    setState(() {
-      if (cleaned != null && cleaned.isNotEmpty) {
-        addressLineController.text = cleaned;
-      }
-      error =
-          failure ??
-          (cleaned == null || cleaned.isEmpty
-              ? 'We couldn’t detect your address. Please enter it manually.'
-              : null);
-      stage = _Stage.found;
-      slowFinding = false;
-    });
-  }
+    setState(() => findPhase = _FindPhase.position);
 
-  /// A slower, accurate GPS fix that quietly improves the pin.
-  Future<void> _refineLocation(int request) async {
-    setState(() => refining = true);
-    DeliveryLocation? precise;
-    try {
-      precise = await locationService.preciseFix();
-    } on Exception {
-      precise = null;
-    }
-    if (!mounted || request != findRequest) return;
-    setState(() => refining = false);
-    final lat = precise?.latitude;
-    final lng = precise?.longitude;
-    final currentLat = latitude;
-    final currentLng = longitude;
-    if (lat == null ||
-        lng == null ||
-        currentLat == null ||
-        currentLng == null ||
-        pinAdjusted) {
-      return;
-    }
-    final moved = LocationService.distanceMeters(
-      currentLat,
-      currentLng,
-      lat,
-      lng,
+    locationSub = locationService.positionUpdates().listen(
+      (fix) => _onFix(request, fix),
+      onError: (Object exception) {
+        if (!mounted || request != findRequest || located) return;
+        if (exception is LocationServiceException) {
+          _fail(request, exception.message, exception.action);
+        } else {
+          _fail(request, _genericFailure, LocationFailureAction.none);
+        }
+      },
     );
-    if (moved < 25) return;
+    settleTimer = Timer(
+      _maxRefineWait,
+      () => unawaited(_finishTracking(request)),
+    );
+  }
+
+  /// A new GPS reading. The first one shows the pin; later ones only replace
+  /// it when they are more accurate.
+  void _onFix(int request, DeliveryLocation fix) {
+    if (!mounted || request != findRequest) return;
+    final lat = fix.latitude;
+    final lng = fix.longitude;
+    if (lat == null || lng == null) return;
+
+    final first = !located;
+    final newAccuracy = fix.accuracy ?? double.infinity;
+    final currentAccuracy = accuracy ?? double.infinity;
+    if (!first && newAccuracy >= currentAccuracy) return;
+
+    slowTimer?.cancel();
     setState(() {
       latitude = lat;
       longitude = lng;
-      deviceLatitude = lat;
-      deviceLongitude = lng;
-      mapVersion++;
-    });
-    unawaited(runCoverageCheck());
-  }
-
-  /// Leaves the "finding" step without waiting for GPS.
-  void enterManually() {
-    findRequest++;
-    slowTimer?.cancel();
-    setState(() {
+      accuracy = fix.accuracy;
       stage = _Stage.found;
       slowFinding = false;
       error = null;
       failureAction = LocationFailureAction.none;
-      latitude = null;
-      longitude = null;
-      pinConfirmed = false;
-      pinAdjusted = false;
+      refining = true;
+    });
+    if (first) unawaited(runCoverageCheck());
+    if (newAccuracy <= _targetAccuracy) unawaited(_finishTracking(request));
+  }
+
+  /// Stops the GPS and settles on the best reading seen.
+  Future<void> _finishTracking(int request) async {
+    if (!mounted || request != findRequest) return;
+    await _stopTracking();
+    if (!mounted || request != findRequest) return;
+
+    final lat = latitude;
+    final lng = longitude;
+    if (lat == null || lng == null) {
+      _fail(
+        request,
+        'Finding your location took too long. Go outdoors or near a window, then try again.',
+        LocationFailureAction.none,
+      );
+      return;
+    }
+
+    final reading = accuracy ?? 0;
+    final approximate = reading > _approximateAccuracy;
+    setState(() {
       refining = false;
-      coverage = const _Coverage.idle();
+      if (approximate) {
+        error =
+            'Your location is only accurate to about ${reading.round()} m. Go outdoors or near a window, and make sure Precise location is on for AquaDirect, then try again.';
+      }
+    });
+    if (!approximate) _toast('Location confirmed');
+
+    final checkedLat = coverageLat;
+    final checkedLng = coverageLng;
+    final moved = checkedLat == null || checkedLng == null
+        ? double.infinity
+        : LocationService.distanceMeters(checkedLat, checkedLng, lat, lng);
+    if (moved >= 25) unawaited(runCoverageCheck());
+  }
+
+  Future<void> _stopTracking() async {
+    settleTimer?.cancel();
+    settleTimer = null;
+    final subscription = locationSub;
+    locationSub = null;
+    await subscription?.cancel();
+  }
+
+  void _fail(int request, String message, LocationFailureAction action) {
+    if (!mounted || request != findRequest) return;
+    slowTimer?.cancel();
+    unawaited(_stopTracking());
+    setState(() {
+      stage = _Stage.failed;
+      error = message;
+      failureAction = action;
+      slowFinding = false;
+      refining = false;
     });
   }
 
@@ -547,6 +495,8 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
     final lng = longitude;
     if (check == null || lat == null || lng == null) return;
     final request = ++coverageRequest;
+    coverageLat = lat;
+    coverageLng = lng;
     setState(() => coverage = const _Coverage(_CoverageState.checking));
     try {
       final count = await check(lat, lng).timeout(const Duration(seconds: 8));
@@ -560,24 +510,11 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
 
   Future<void> openSettings() => locationService.openSettings(failureAction);
 
-  void selectMapLocation(LatLng point) {
-    setState(() {
-      latitude = point.latitude;
-      longitude = point.longitude;
-      error = null;
-      pinAdjusted = true;
-      pinConfirmed = true;
-      addressFormError = null;
-      areaLookupError = null;
-    });
-    _toast('Pin updated');
-    unawaited(runCoverageCheck());
-  }
-
   // --------------------------------------------------------------- continue
 
   void _finish(DeliveryLocation location, String label) {
     findRequest++;
+    unawaited(_stopTracking());
     if (widget.onLocationSelected != null) {
       widget.onLocationSelected!(location);
       return;
@@ -593,23 +530,37 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
     );
   }
 
+  /// Returns an error message when the current reading can't be used yet.
+  String? _locationProblem() {
+    final lat = latitude;
+    final lng = longitude;
+    if (lat == null || lng == null) {
+      return 'We still need your device location. Tap Try again.';
+    }
+    if (!_inPhilippines(lat, lng)) {
+      return widget.browsingOnly
+          ? 'The location must be within the Philippines.'
+          : 'Your location must be within the Philippines.';
+    }
+    if ((accuracy ?? 0) > _maxUsableAccuracy) {
+      return 'Your location isn’t precise enough yet. Go outdoors or near a window, then tap Try again.';
+    }
+    return null;
+  }
+
   void continueFlow() {
     if (widget.browsingOnly) {
-      if (!located || !pinConfirmed) {
-        setState(
-          () => addressFormError = 'Set your location on the map first.',
-        );
-        return;
-      }
-      if (!_inPhilippines(latitude!, longitude!)) {
-        setState(
-          () =>
-              addressFormError = 'The location must be within the Philippines.',
-        );
+      final problem = _locationProblem();
+      if (problem != null) {
+        setState(() => addressFormError = problem);
         return;
       }
       _finish(
-        DeliveryLocation(latitude: latitude, longitude: longitude),
+        DeliveryLocation(
+          latitude: latitude,
+          longitude: longitude,
+          accuracy: accuracy,
+        ),
         'Current location',
       );
       return;
@@ -633,23 +584,15 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
       FocusScope.of(context).requestFocus(addressLineFocus);
       return;
     }
-    if (!located || !pinConfirmed) {
-      setState(
-        () => addressFormError =
-            'Tap the map to confirm the exact delivery point.',
-      );
-      return;
-    }
-    if (!_inPhilippines(latitude!, longitude!)) {
-      setState(
-        () => addressFormError =
-            'The delivery pin must be within the Philippines.',
-      );
+    final problem = _locationProblem();
+    if (problem != null) {
+      setState(() => addressFormError = problem);
       return;
     }
     final location = DeliveryLocation(
       latitude: latitude,
       longitude: longitude,
+      accuracy: accuracy,
       address: structuredAddress,
       addressLine: streetAddress,
       barangay: selectedBarangay,
@@ -659,11 +602,13 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
     _finish(location, location.address!);
   }
 
-  /// Continues to authentication without a delivery location. The home screen
-  /// should then ask the customer to set one (see NoLocationCard).
+  /// Continues to authentication without a delivery location. Only offered
+  /// after a failure. The home screen should then ask the customer to set one
+  /// (see NoLocationCard).
   void skip() {
     findRequest++;
     slowTimer?.cancel();
+    unawaited(_stopTracking());
     if (widget.onSkip != null) {
       widget.onSkip!();
       return;
@@ -683,17 +628,13 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
         bottom: false,
         child: Stack(
           children: [
-            Column(
-              children: [
-                _TopBar(onSkip: stage == _Stage.finding ? skip : null),
-                Expanded(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 300),
-                    switchInCurve: Curves.easeOut,
-                    child: _content(key: ValueKey(stage)),
-                  ),
-                ),
-              ],
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                switchInCurve: Curves.easeOut,
+                child: _content(key: ValueKey(stage)),
+              ),
             ),
             if (toastMessage != null)
               Positioned(
@@ -720,69 +661,55 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
     );
   }
 
-  Widget _content({required Key key}) =>
-      stage == _Stage.finding ? _finding(key) : _found(key);
+  Widget _content({required Key key}) => switch (stage) {
+    _Stage.finding => _finding(key),
+    _Stage.found => _found(key),
+    _Stage.failed => _failed(key),
+  };
 
   Widget? _footer() {
-    if (stage == _Stage.finding) {
-      if (!slowFinding) return null;
-      return _Footer(
-        child: OutlinedButton(
-          onPressed: enterManually,
-          style: OutlinedButton.styleFrom(
-            foregroundColor: _navy,
-            minimumSize: const Size.fromHeight(50),
-            side: const BorderSide(color: _line),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-          child: Text(
-            widget.browsingOnly
-                ? 'Choose on the map'
-                : 'Enter address manually',
-            style: _t(14, w: FontWeight.w700),
-          ),
-        ),
-      );
-    }
-
-    if (widget.browsingOnly) {
-      return _Footer(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _PrimaryButton(label: 'See nearby stations', onTap: continueFlow),
-            if (!located)
+    switch (stage) {
+      case _Stage.finding:
+        return null;
+      case _Stage.failed:
+        final none = failureAction == LocationFailureAction.none;
+        return _Footer(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _PrimaryButton(
+                label: switch (failureAction) {
+                  LocationFailureAction.none => 'Try again',
+                  LocationFailureAction.appSettings => 'Open app settings',
+                  LocationFailureAction.locationSettings =>
+                    'Open location settings',
+                },
+                onTap: none ? startFinding : openSettings,
+              ),
               TextButton(
                 onPressed: skip,
                 child: Text(
-                  'Continue without a location',
+                  'Skip for now',
                   style: _t(13.5, w: FontWeight.w700, c: _muted),
                 ),
               ),
-            const SizedBox(height: 12),
-          ],
-        ),
-      );
-    }
-
-    return _Footer(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _PrimaryButton(label: 'Continue', onTap: continueFlow),
-          if (!located)
-            TextButton(
-              onPressed: skip,
-              child: Text(
-                'Continue without a location',
-                style: _t(13.5, w: FontWeight.w700, c: _muted),
+            ],
+          ),
+        );
+      case _Stage.found:
+        return _Footer(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _PrimaryButton(
+                label: widget.browsingOnly ? 'See nearby stations' : 'Continue',
+                onTap: continueFlow,
               ),
-            ),
-        ],
-      ),
-    );
+              const SizedBox(height: 4),
+            ],
+          ),
+        );
+    }
   }
 
   // ---------------------------------------------------------------- finding
@@ -848,7 +775,7 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
               const SizedBox(height: 24),
               const _Notice(
                 message:
-                    'This is taking longer than usual. Check that location services are on, or choose your location manually.',
+                    'This is taking longer than usual. Check that location services are on, and try going outdoors or near a window.',
               ),
             ],
           ],
@@ -857,29 +784,68 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
     ),
   );
 
+  // ----------------------------------------------------------------- failed
+
+  Widget _failed(Key key) {
+    final title = switch (failureAction) {
+      LocationFailureAction.none => 'We can’t find you yet',
+      LocationFailureAction.appSettings => 'Location access is off',
+      LocationFailureAction.locationSettings => 'Turn on location',
+    };
+    return SizedBox.expand(
+      key: key,
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFFEAF4FF),
+                ),
+                child: const Icon(
+                  Icons.location_off_rounded,
+                  color: _blue,
+                  size: 30,
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: _t(24, w: FontWeight.w800, h: 1.2, ls: -.6),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                error ?? _genericFailure,
+                textAlign: TextAlign.center,
+                style: _t(14.5, c: _muted, h: 1.5),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // ------------------------------------------------------------------ found
 
   Widget _found(Key key) {
     final browsing = widget.browsingOnly;
-    final title = browsing
-        ? (located ? 'Your location' : 'Choose your location')
-        : (located ? 'Confirm your address' : 'Set your delivery address');
+    final title = browsing ? 'Your location' : 'Confirm your address';
     final subtitle = browsing
-        ? (located
-              ? 'We’ll use this to find nearby stations. It won’t be saved as a delivery address.'
-              : 'Tap the map to choose where to search.')
-        : (located
-              ? 'We found your location. Add your address details below.'
-              : 'Tap the map to drop a pin, then add your address details.');
+        ? 'We use your device location to find nearby stations. It won’t be saved as a delivery address.'
+        : 'We found where you are. Add your address details so the rider can find you.';
 
-    Widget map(double? height) => _MapPreview(
-      key: ValueKey(mapVersion),
-      height: height,
+    final map = _MapPreview(
+      height: browsing ? null : 200,
       latitude: latitude,
       longitude: longitude,
-      pinConfirmed: pinConfirmed,
-      resolving: locatingSelectedArea,
-      onTap: selectMapLocation,
+      accuracy: accuracy,
     );
 
     final header = <Widget>[
@@ -888,26 +854,12 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
       Text(subtitle, style: _t(14.5, c: _muted, h: 1.5)),
       const SizedBox(height: 16),
       if (error != null) ...[
-        _Notice(
-          message: error!,
-          actionLabel: switch (failureAction) {
-            LocationFailureAction.none => 'Try again',
-            LocationFailureAction.appSettings => 'Open app settings',
-            LocationFailureAction.locationSettings => 'Open location settings',
-          },
-          onAction: failureAction == LocationFailureAction.none
-              ? startFinding
-              : openSettings,
-        ),
+        _Notice(message: error!, actionLabel: 'Try again', onAction: startFinding),
         const SizedBox(height: 14),
       ],
     ];
 
-    final status = _StatusLine(
-      refining: refining,
-      pinAdjusted: pinAdjusted,
-      deviceConfirmed: pinConfirmed && !pinAdjusted,
-    );
+    final status = _StatusLine(refining: refining, accuracy: accuracy);
 
     final feedback = <Widget>[
       if (coverage.state != _CoverageState.idle) ...[
@@ -931,8 +883,7 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               ...header,
-              Expanded(child: map(null)),
-              const SizedBox(height: 12),
+              Expanded(child: map),
               status,
               ...feedback,
             ],
@@ -950,19 +901,8 @@ class _LocationFlowScreenState extends State<LocationFlowScreen>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             ...header,
-            map(200),
+            map,
             status,
-            if (areaLookupError != null) ...[
-              const SizedBox(height: 10),
-              _Notice(
-                message: areaLookupError!,
-                error: true,
-                actionLabel: selectedBarangay == null ? null : 'Retry',
-                onAction: selectedBarangay == null
-                    ? null
-                    : _centerPinOnSelectedArea,
-              ),
-            ],
             const SizedBox(height: 16),
             _DivisionSelector(
               label: 'Province',
@@ -1065,37 +1005,6 @@ class _ToastCard extends StatelessWidget {
   );
 }
 
-class _TopBar extends StatelessWidget {
-  const _TopBar({this.onSkip});
-  final VoidCallback? onSkip;
-
-  @override
-  Widget build(BuildContext context) => SizedBox(
-    height: 52,
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(24, 0, 12, 0),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          if (onSkip != null)
-            TextButton(
-              onPressed: onSkip,
-              style: TextButton.styleFrom(
-                foregroundColor: _muted,
-                minimumSize: const Size(0, 36),
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-              ),
-              child: Text(
-                'Skip',
-                style: _t(13.5, w: FontWeight.w700, c: _muted),
-              ),
-            ),
-        ],
-      ),
-    ),
-  );
-}
-
 class _Footer extends StatelessWidget {
   const _Footer({required this.child});
   final Widget child;
@@ -1141,49 +1050,32 @@ class _PrimaryButton extends StatelessWidget {
   );
 }
 
-/// Quiet status under the map.
+/// Quiet status under the map: sharpening, then confirmed.
 class _StatusLine extends StatelessWidget {
-  const _StatusLine({
-    required this.refining,
-    required this.pinAdjusted,
-    required this.deviceConfirmed,
-  });
+  const _StatusLine({required this.refining, required this.accuracy});
   final bool refining;
-  final bool pinAdjusted;
-  final bool deviceConfirmed;
+  final double? accuracy;
 
   @override
   Widget build(BuildContext context) {
-    Widget? row;
-    if (pinAdjusted) {
-      row = _row(
-        const Icon(Icons.touch_app_rounded, size: 15, color: _muted),
-        'Pin placed by you. Tap the map to adjust.',
-        _muted,
-      );
-    } else if (refining) {
-      row = _row(
-        const SizedBox(
-          width: 13,
-          height: 13,
-          child: CircularProgressIndicator(strokeWidth: 2, color: _blue),
-        ),
-        'Improving accuracy…',
-        _muted,
-      );
-    } else if (deviceConfirmed) {
-      row = _row(
-        const Icon(Icons.check_circle_rounded, size: 15, color: _green),
-        'Using your device location',
-        _green,
-      );
-    }
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 200),
-      alignment: Alignment.topCenter,
-      child: row == null
-          ? const SizedBox(width: double.infinity)
-          : Padding(padding: const EdgeInsets.only(top: 10), child: row),
+    final meters = accuracy == null ? '' : ' (±${accuracy!.round()} m)';
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: refining
+          ? _row(
+              const SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(strokeWidth: 2, color: _blue),
+              ),
+              'Improving accuracy…$meters',
+              _muted,
+            )
+          : _row(
+              const Icon(Icons.check_circle_rounded, size: 15, color: _green),
+              'Using your device location$meters',
+              _green,
+            ),
     );
   }
 
@@ -1394,37 +1286,60 @@ class _DivisionSelector extends StatelessWidget {
 
 // --------------------------------------------------------------- map preview
 
-class _MapPreview extends StatelessWidget {
+/// Read-only map that follows the device GPS. The customer can't tap or drag
+/// it. A soft circle shows how accurate the reading is.
+class _MapPreview extends StatefulWidget {
   const _MapPreview({
-    super.key,
     required this.height,
     required this.latitude,
     required this.longitude,
-    required this.pinConfirmed,
-    required this.resolving,
-    required this.onTap,
+    required this.accuracy,
   });
 
   final double? height;
   final double? latitude;
   final double? longitude;
-  final bool pinConfirmed;
-  final bool resolving;
-  final ValueChanged<LatLng> onTap;
+  final double? accuracy;
+
+  @override
+  State<_MapPreview> createState() => _MapPreviewState();
+}
+
+class _MapPreviewState extends State<_MapPreview> {
+  static const double _zoom = 17;
+  final MapController _controller = MapController();
+
+  @override
+  void didUpdateWidget(covariant _MapPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final lat = widget.latitude;
+    final lng = widget.longitude;
+    if (lat == null || lng == null) return;
+    if (lat != oldWidget.latitude || lng != oldWidget.longitude) {
+      // Slide the map to the sharper reading once the frame is built.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _controller.move(LatLng(lat, lng), _zoom);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final hasPin = latitude != null && longitude != null;
-    final label = pinConfirmed
-        ? 'Pin set'
-        : hasPin
-        ? 'Tap the map to confirm pin'
-        : 'Tap the map to set your pin';
+    final lat = widget.latitude;
+    final lng = widget.longitude;
+    final accuracy = widget.accuracy;
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
       child: Container(
-        height: height,
+        height: widget.height,
         width: double.infinity,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(20),
@@ -1433,14 +1348,14 @@ class _MapPreview extends StatelessWidget {
         child: Stack(
           children: [
             FlutterMap(
+              mapController: _controller,
               options: MapOptions(
-                initialCenter: hasPin
-                    ? LatLng(latitude!, longitude!)
+                initialCenter: lat != null && lng != null
+                    ? LatLng(lat, lng)
                     : const LatLng(12.8797, 121.7740),
-                initialZoom: hasPin ? 16 : 5,
-                onTap: (_, point) => onTap(point),
+                initialZoom: lat != null && lng != null ? _zoom : 5,
                 interactionOptions: const InteractionOptions(
-                  flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+                  flags: InteractiveFlag.none,
                 ),
               ),
               children: [
@@ -1449,11 +1364,24 @@ class _MapPreview extends StatelessWidget {
                   userAgentPackageName: 'com.example.test4',
                   maxZoom: 19,
                 ),
-                if (hasPin)
+                if (lat != null && lng != null && accuracy != null)
+                  CircleLayer(
+                    circles: [
+                      CircleMarker(
+                        point: LatLng(lat, lng),
+                        radius: accuracy,
+                        useRadiusInMeter: true,
+                        color: _blue.withValues(alpha: .12),
+                        borderColor: _blue.withValues(alpha: .4),
+                        borderStrokeWidth: 1,
+                      ),
+                    ],
+                  ),
+                if (lat != null && lng != null)
                   MarkerLayer(
                     markers: [
                       Marker(
-                        point: LatLng(latitude!, longitude!),
+                        point: LatLng(lat, lng),
                         width: 64,
                         height: 64,
                         child: const _PinMarker(),
@@ -1483,25 +1411,12 @@ class _MapPreview extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (resolving)
-                      const SizedBox(
-                        width: 13,
-                        height: 13,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: _blue,
-                        ),
-                      )
-                    else
-                      Icon(
-                        pinConfirmed
-                            ? Icons.check_circle_rounded
-                            : Icons.touch_app_rounded,
-                        color: pinConfirmed ? _green : _blue,
-                        size: 14,
-                      ),
+                    const Icon(Icons.near_me_rounded, color: _blue, size: 14),
                     const SizedBox(width: 6),
-                    Text(label, style: _t(11.5, w: FontWeight.w700)),
+                    Text(
+                      'Your current location',
+                      style: _t(11.5, w: FontWeight.w700),
+                    ),
                   ],
                 ),
               ),

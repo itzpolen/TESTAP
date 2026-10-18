@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 
@@ -7,6 +8,7 @@ class DeliveryLocation {
   const DeliveryLocation({
     this.latitude,
     this.longitude,
+    this.accuracy,
     this.address,
     this.addressLine,
     this.barangay,
@@ -16,6 +18,10 @@ class DeliveryLocation {
 
   final double? latitude;
   final double? longitude;
+
+  /// Horizontal accuracy of the GPS reading, in meters (smaller is better).
+  /// Save this next to the coordinates so you know how far to trust the pin.
+  final double? accuracy;
   final String? address;
   final String? addressLine;
   final String? barangay;
@@ -46,7 +52,7 @@ class LocationService {
   static const _geocodeTimeout = Duration(seconds: 8);
 
   /// Checks that location services are on and permission is granted,
-  /// asking the user when needed.
+  /// asking the user when needed. This is what shows the OS permission prompt.
   Future<void> ensurePermission() async {
     if (!await Geolocator.isLocationServiceEnabled()) {
       throw const LocationServiceException(
@@ -61,19 +67,100 @@ class LocationService {
     }
     if (permission == LocationPermission.denied) {
       throw const LocationServiceException(
-        'Location permission was denied. Allow location access or enter your address manually.',
+        'Location permission was denied. Allow location access to find stations that deliver to you.',
       );
     }
     if (permission == LocationPermission.deniedForever) {
       throw const LocationServiceException(
-        'Location permission is blocked. Enable it in your device settings or enter your address manually.',
+        'Location permission is blocked. Enable it in your device settings to find stations that deliver to you.',
         action: LocationFailureAction.appSettings,
       );
     }
   }
 
-  /// Fast, slightly coarser fix (usually a few seconds). Good enough to show
-  /// the pin and search for stations while a precise fix improves it later.
+  // ---------------------------------------------------------------- live GPS
+
+  /// Live GPS readings at the best accuracy the phone can give.
+  ///
+  /// The first readings are usually rough and get better every second or two,
+  /// so listen until a reading is good enough, then cancel the subscription so
+  /// the GPS is not left running. Errors (permission, location off) arrive as
+  /// stream errors.
+  Stream<DeliveryLocation> positionUpdates() async* {
+    await ensurePermission();
+    yield* Geolocator.getPositionStream(
+      locationSettings: _streamSettings(),
+    ).map(_fromPosition);
+  }
+
+  /// One-shot version of [positionUpdates]: waits until a reading is within
+  /// [targetAccuracy] meters, or [maxWait] passes, and returns the best
+  /// reading seen. Handy for checkout or "use my location now" buttons.
+  Future<DeliveryLocation> bestFix({
+    double targetAccuracy = 25,
+    Duration maxWait = const Duration(seconds: 25),
+  }) async {
+    DeliveryLocation? best;
+    final good = Completer<void>();
+    final subscription = positionUpdates().listen(
+      (fix) {
+        final current = best;
+        if (current == null || _accuracyOf(fix) < _accuracyOf(current)) {
+          best = fix;
+        }
+        if (_accuracyOf(fix) <= targetAccuracy && !good.isCompleted) {
+          good.complete();
+        }
+      },
+      onError: (Object error, StackTrace stack) {
+        if (good.isCompleted) return;
+        if (best != null) {
+          good.complete(); // keep what we already have
+        } else {
+          good.completeError(error, stack);
+        }
+      },
+    );
+
+    try {
+      await good.future.timeout(maxWait);
+    } on TimeoutException {
+      // Use the best reading seen so far.
+    } finally {
+      await subscription.cancel();
+    }
+
+    final result = best ?? await _lastKnown();
+    if (result == null) {
+      throw const LocationServiceException(
+        'We couldn’t get your GPS location. Go outdoors or near a window and try again.',
+      );
+    }
+    return result;
+  }
+
+  static double _accuracyOf(DeliveryLocation location) =>
+      location.accuracy ?? double.infinity;
+
+  LocationSettings _streamSettings() {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.best,
+        distanceFilter: 0,
+        intervalDuration: const Duration(seconds: 1),
+      );
+    }
+    return const LocationSettings(
+      accuracy: LocationAccuracy.best,
+      distanceFilter: 0,
+    );
+  }
+
+  // ------------------------------------------------ older one-shot helpers
+  // Kept so existing callers keep compiling. New code should prefer
+  // [positionUpdates] or [bestFix].
+
+  /// Fast, slightly coarser fix (usually a few seconds).
   Future<DeliveryLocation> quickFix() async {
     await ensurePermission();
     try {
@@ -88,13 +175,12 @@ class LocationService {
       final cached = await _lastKnown();
       if (cached != null) return cached;
       throw const LocationServiceException(
-        'We couldn’t get a GPS fix in time. Move near a window or open space and try again, or enter your address manually.',
+        'We couldn’t get a GPS fix in time. Move near a window or open space and try again.',
       );
     }
   }
 
-  /// Accurate fix used to refine the pin in the background. Returns null when
-  /// it can't be obtained; callers keep the quick fix in that case.
+  /// Accurate fix. Returns null when it can't be obtained.
   Future<DeliveryLocation?> preciseFix() async {
     try {
       final position = await Geolocator.getCurrentPosition(
@@ -109,7 +195,7 @@ class LocationService {
     }
   }
 
-  /// Single high-accuracy fix (kept for existing callers).
+  /// Single high-accuracy fix.
   Future<DeliveryLocation> getCurrentLocation() async {
     await ensurePermission();
     try {
@@ -124,7 +210,7 @@ class LocationService {
       final cached = await _lastKnown();
       if (cached != null) return cached;
       throw const LocationServiceException(
-        'We couldn’t get a GPS fix in time. Move near a window or open space and try again, or enter your address manually.',
+        'We couldn’t get a GPS fix in time. Move near a window or open space and try again.',
       );
     }
   }
@@ -132,6 +218,7 @@ class LocationService {
   DeliveryLocation _fromPosition(Position position) => DeliveryLocation(
     latitude: position.latitude,
     longitude: position.longitude,
+    accuracy: position.accuracy,
   );
 
   /// Straight-line distance in meters.
@@ -151,10 +238,7 @@ class LocationService {
     try {
       final position = await Geolocator.getLastKnownPosition();
       if (position == null) return null;
-      return DeliveryLocation(
-        latitude: position.latitude,
-        longitude: position.longitude,
-      );
+      return _fromPosition(position);
     } catch (_) {
       return null; // not supported on every platform
     }
