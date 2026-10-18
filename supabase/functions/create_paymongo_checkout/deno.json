@@ -1,0 +1,9 @@
+{
+  "nodeModulesDir": "auto",
+  "dependencies": {
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2"
+  },
+  "compilerOptions": {
+    "strict": true
+  }
+}
