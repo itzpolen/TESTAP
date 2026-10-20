@@ -1,6 +1,7 @@
 /// <reference lib="deno.ns" />
 
 import { corsHeaders, isUuid, jsonResponse, serviceClient } from "../_shared/http.ts";
+import { paymongoRequest } from "../_shared/paymongo.ts";
 
 function equalHex(left: string, right: string): boolean {
   if (!/^[0-9a-f]+$/i.test(left) || !/^[0-9a-f]+$/i.test(right) || left.length !== right.length) {
@@ -38,11 +39,9 @@ async function verifySignature(rawBody: string, header: string, liveMode: boolea
   const actual = Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join("");
   return equalHex(actual, expected);
 }
-
-
-
 function paymentStatus(eventType: string): string | null {
-  if (eventType === "payment.paid" || eventType === "checkout_session.payment.paid") return "paid";
+  if (eventType === "payment.paid" || eventType === "checkout_session.payment.paid" ||
+    eventType === "qr.paid" || eventType === "qrph.paid") return "paid";
   if (eventType === "payment.failed" || eventType === "checkout_session.payment.failed") return "failed";
   if (eventType === "checkout_session.expired") return "cancelled";
   return null;
@@ -109,7 +108,17 @@ Deno.serve(async (request) => {
     const resource = event.data?.attributes?.data;
     const attributes = resource?.attributes ?? {};
     const metadata = attributes.metadata as Record<string, unknown> | undefined;
-    //const nestedPayment = attributes.payments as { data?: Array<{ id?: string }> } | undefined;
+    const isQrPaid = eventType === "qr.paid" || eventType === "qrph.paid";
+    const isQrExpired = eventType === "qr.expired" || eventType === "qrph.expired";
+    const paymentIntentValue = attributes.payment_intent_id ?? attributes.payment_intent;
+    const paymentIntentId = typeof paymentIntentValue === "string"
+      ? paymentIntentValue
+      : typeof paymentIntentValue === "object" && paymentIntentValue !== null &&
+          "id" in paymentIntentValue && typeof paymentIntentValue.id === "string"
+      ? paymentIntentValue.id
+      : typeof resource?.id === "string" && resource.id.startsWith("pi_")
+      ? resource.id
+      : null;
     const nestedFirst = _firstPayment(attributes.payments);
     const paymentIdFromMetadata = metadata?.payment_id;
     const paymentIdFromPayload = isUuid(paymentIdFromMetadata) ? paymentIdFromMetadata : null;
@@ -118,17 +127,10 @@ Deno.serve(async (request) => {
       : typeof attributes.checkout_session_id === "string"
       ? attributes.checkout_session_id
       : null;
-   /* const providerPaymentId = resource?.type === "payment"
+    let providerPaymentId = resource?.type === "payment"
       ? resource.id
-      : nestedPayment?.data?.[0]?.id
-        ?? (typeof attributes.payment_intent_id === "string" ? attributes.payment_intent_id : null);
-    */
-   const providerPaymentId = resource?.type === "payment"
-  ? resource.id
-  : nestedFirst?.id
-    ?? (typeof attributes.payment_intent_id === "string" ? attributes.payment_intent_id : null);
+      : nestedFirst?.id ?? (isQrPaid || isQrExpired ? null : paymentIntentId);
 
-    
     const admin = serviceClient();
     let payment: {
       id: string;
@@ -153,6 +155,14 @@ Deno.serve(async (request) => {
       if (result.error) throw result.error;
       payment = result.data;
     }
+    if (!payment && paymentIntentId) {
+      const result = await admin.from("payments")
+        .select("id, status, amount, provider_checkout_id, provider_payment_id")
+        .eq("provider_checkout_id", paymentIntentId)
+        .maybeSingle();
+      if (result.error) throw result.error;
+      payment = result.data;
+    }
     if (!payment && providerPaymentId) {
       const result = await admin.from("payments")
         .select("id, status, amount, provider_checkout_id, provider_payment_id")
@@ -160,6 +170,30 @@ Deno.serve(async (request) => {
         .maybeSingle();
       if (result.error) throw result.error;
       payment = result.data;
+    }
+
+    let qrIntentPayment: ProviderPayment | undefined;
+    if (isQrPaid) {
+      if (!paymentIntentId) {
+        throw new Error("PayMongo QR paid event did not include its payment intent ID");
+      }
+      const intentResponse = await paymongoRequest(
+        `/payment_intents/${encodeURIComponent(paymentIntentId)}`,
+      );
+      const intent = intentResponse.data as {
+        attributes?: {
+          status?: string;
+          payments?: { data?: Array<{ id?: string; attributes?: { status?: string; amount?: number } }> };
+        };
+      } | undefined;
+      if (intent?.attributes?.status !== "succeeded") {
+        throw new Error("PayMongo QR paid event is not confirmed by the payment intent");
+      }
+      qrIntentPayment = _firstPayment(intent.attributes.payments);
+      if (!qrIntentPayment?.id || typeof qrIntentPayment.attributes?.amount !== "number") {
+        throw new Error("PayMongo did not return the captured QR payment details");
+      }
+      providerPaymentId = qrIntentPayment.id;
     }
 
     const normalizedStatus = paymentStatus(eventType);
@@ -181,9 +215,8 @@ Deno.serve(async (request) => {
       refund = result.data;
     }
 
-    const rawAmount = typeof attributes.amount === "number"
-      ? attributes.amount
-      : nestedFirst?.attributes?.amount;
+    const rawAmount = qrIntentPayment?.attributes?.amount ??
+      (typeof attributes.amount === "number" ? attributes.amount : nestedFirst?.attributes?.amount);
     const amount = typeof rawAmount === "number" ? rawAmount / 100 : null;
     const normalizedRefundStatus = refundStatus(eventType) ??
       refundStatus(attributes.status);
@@ -194,7 +227,7 @@ Deno.serve(async (request) => {
       p_event_type: eventType,
       p_payload: event,
       p_signature_valid: true,
-      p_payment_status: normalizedStatus ?? payment?.status ?? null,
+      p_payment_status: isQrExpired ? "processing" : normalizedStatus ?? payment?.status ?? null,
       p_amount: amount,
       p_provider_payment_id: providerPaymentId,
       p_refund_id: refund?.id ?? null,

@@ -301,6 +301,88 @@ class SupabaseService {
         .toList(growable: false);
   }
 
+  static Future<({String orderId, int? rating})?> getStationRatingTarget(
+    String stationId,
+  ) async {
+    final customerId = client.auth.currentUser?.id;
+    if (customerId == null) return null;
+
+    final order = await client
+        .from('orders')
+        .select('id')
+        .eq('customer_id', customerId)
+        .eq('station_id', stationId)
+        .eq('status', 'delivered')
+        .order('created_at', ascending: false)
+        .limit(1)
+        .maybeSingle();
+    if (order == null) return null;
+
+    final review = await client
+        .from('station_reviews')
+        .select('rating')
+        .eq('order_id', order['id'] as String)
+        .eq('customer_id', customerId)
+        .maybeSingle();
+    return (
+      orderId: order['id'] as String,
+      rating: (review?['rating'] as num?)?.toInt(),
+    );
+  }
+
+  static Future<void> saveStationRating({
+    required String orderId,
+    required String stationId,
+    required int rating,
+  }) async {
+    if (rating < 1 || rating > 5) {
+      throw ArgumentError.value(rating, 'rating', 'Must be between 1 and 5.');
+    }
+    final customerId = client.auth.currentUser?.id;
+    if (customerId == null) {
+      throw StateError('Sign in to rate this station.');
+    }
+
+    final existing = await client
+        .from('station_reviews')
+        .select('id')
+        .eq('order_id', orderId)
+        .eq('customer_id', customerId)
+        .maybeSingle();
+    if (existing != null) {
+      await client
+          .from('station_reviews')
+          .update({
+            'rating': rating,
+            'updated_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', existing['id'] as String);
+      return;
+    }
+
+    await client.from('station_reviews').insert({
+      'order_id': orderId,
+      'station_id': stationId,
+      'customer_id': customerId,
+      'rating': rating,
+    });
+  }
+
+  static Future<({double? average, int count})?> getPublicStationRatingSummary(
+    String stationId,
+  ) async {
+    final station = await client
+        .from('public_stations')
+        .select('rating_average, rating_count')
+        .eq('station_id', stationId)
+        .maybeSingle();
+    if (station == null) return null;
+    return (
+      average: (station['rating_average'] as num?)?.toDouble(),
+      count: (station['rating_count'] as num?)?.toInt() ?? 0,
+    );
+  }
+
   static Future<List<StationMarketplaceProduct>> getStationProducts(
     String stationId,
   ) async {
@@ -772,11 +854,12 @@ class SupabaseService {
 
   static Future<String> _getStationName(String stationId) async {
     final station = await client
-        .from('stations')
+        .from('public_stations')
         .select('display_name')
-        .eq('id', stationId)
+        .eq('station_id', stationId)
         .maybeSingle();
-    return station?['display_name'] as String? ?? 'Water station';
+    final displayName = (station?['display_name'] as String?)?.trim();
+    return displayName?.isNotEmpty == true ? displayName! : 'Water station';
   }
 
   static Future<void> updateCartItemQuantity({
@@ -1128,15 +1211,22 @@ class SupabaseService {
         .toList(growable: false);
   }
 
-  static Future<void> dismissCancelledCustomerOrder(String orderId) async {
+  static Future<void> dismissFinishedCustomerOrders(
+    List<String> orderIds,
+  ) async {
+    if (orderIds.isEmpty) return;
     final userId = client.auth.currentUser?.id;
     if (userId == null) {
-      throw Exception('Sign in to remove a cancelled order from your history.');
+      throw Exception('Sign in to clear orders from your history.');
     }
-    await client.from('customer_order_dismissals').insert({
-      'user_id': userId,
-      'order_id': orderId,
-    });
+    await client
+        .from('customer_order_dismissals')
+        .insert(
+          orderIds
+              .toSet()
+              .map((orderId) => {'user_id': userId, 'order_id': orderId})
+              .toList(growable: false),
+        );
   }
 
   static Future<List<CustomerDeliveryTracking>>

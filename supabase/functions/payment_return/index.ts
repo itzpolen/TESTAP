@@ -1,7 +1,13 @@
-function returnPage(status: "success" | "cancel"): string {
-  const title = status === "success" ? "Payment submitted" : "Checkout cancelled";
+function returnPage(status: "success" | "failed" | "cancel"): string {
+  const title = status === "success"
+    ? "Payment submitted"
+    : status === "failed"
+    ? "Payment failed"
+    : "Checkout cancelled";
   const message = status === "success"
     ? "Return to AquaDirect. The app will check your payment status."
+    : status === "failed"
+    ? "PayMongo did not confirm this payment. Return to AquaDirect to check your order or try again."
     : "No payment confirmation was received. Return to AquaDirect to retry if you want.";
 
   return `<!doctype html>
@@ -38,8 +44,8 @@ Deno.serve((request) => {
   }
 
   const status = new URL(request.url).searchParams.get("status");
-  if (status !== "success" && status !== "cancel") {
-    return new Response("Use status=success or status=cancel.", {
+  if (status !== "success" && status !== "failed" && status !== "cancel") {
+    return new Response("Use status=success, status=failed, or status=cancel.", {
       status: 400,
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });

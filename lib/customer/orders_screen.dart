@@ -49,11 +49,7 @@ IconData _orderStatusIcon(String status) => switch (status) {
         icon: Icons.cancel_outlined,
       );
     case 'refunded':
-      return (
-        label: 'Refunded',
-        color: textGray,
-        icon: Icons.undo_rounded,
-      );
+      return (label: 'Refunded', color: textGray, icon: Icons.undo_rounded);
     case 'partially_refunded':
       return (
         label: 'Partially refunded',
@@ -83,13 +79,17 @@ IconData _orderStatusIcon(String status) => switch (status) {
 
 bool _awaitingPayment(CustomerOrder order) =>
     order.paymentMethod == 'paymongo' &&
-    !const {'paid', 'partially_refunded', 'refunded'}.contains(
-      order.paymentStatus,
-    ) &&
+    !const {
+      'paid',
+      'partially_refunded',
+      'refunded',
+    }.contains(order.paymentStatus) &&
     !_isCancelled(order.status);
 
 class OrdersScreen extends StatefulWidget {
-  const OrdersScreen({super.key});
+  const OrdersScreen({super.key, this.onOrdersChanged});
+
+  final Future<void> Function()? onOrdersChanged;
 
   @override
   State<OrdersScreen> createState() => _OrdersScreenState();
@@ -100,6 +100,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
   final _searchController = TextEditingController();
   List<CustomerOrder> _orders = const [];
   bool _loading = true;
+  bool _refreshing = false;
+  bool _clearingFinishedOrders = false;
   String? _error;
   RealtimeChannel? _ordersChannel;
   Timer? _reloadDebounce;
@@ -149,17 +151,16 @@ class _OrdersScreenState extends State<OrdersScreen> {
   List<CustomerOrder> _computeVisible() {
     final byStatus = switch (_filter) {
       _OrderFilter.all => _orders,
-      _OrderFilter.inProgress =>
-        _orders.where((o) => o.isInProgress).toList(),
+      _OrderFilter.inProgress => _orders.where((o) => o.isInProgress).toList(),
       _OrderFilter.delivered =>
         _orders.where((o) => o.status == 'delivered').toList(),
       _OrderFilter.cancelled =>
         _orders.where((o) => _isCancelled(o.status)).toList(),
     };
-    final query = _searchController.text
-        .trim()
-        .toLowerCase()
-        .replaceFirst('#', '');
+    final query = _searchController.text.trim().toLowerCase().replaceFirst(
+      '#',
+      '',
+    );
     if (query.isEmpty) return byStatus;
     return byStatus
         .where(
@@ -179,6 +180,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
         _loading = true;
         _error = null;
       });
+    } else if (!silent) {
+      setState(() => _refreshing = true);
     }
     try {
       final orders = await SupabaseService.getCustomerOrders();
@@ -187,6 +190,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
       setState(() {
         _orders = orders;
         _loading = false;
+        _refreshing = false;
         _error = null;
       });
     } on Exception catch (error) {
@@ -194,6 +198,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
       final hadOrders = _orders.isNotEmpty;
       setState(() {
         _loading = false;
+        _refreshing = false;
         if (!hadOrders) _error = error.toString();
       });
       if (hadOrders && !silent) {
@@ -215,7 +220,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
   void _openOrder(CustomerOrder order) {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => _OrderDetailsScreen(order: order)),
+      MaterialPageRoute<void>(
+        builder: (_) => _OrderDetailsScreen(order: order),
+      ),
     );
   }
 
@@ -264,7 +271,10 @@ class _OrdersScreenState extends State<OrdersScreen> {
     final visible = _computeVisible();
     final activeCount = _orders.where((o) => o.isInProgress).length;
     final deliveredCount = _orders.where((o) => o.status == 'delivered').length;
-    final cancelledCount = _orders.where((o) => _isCancelled(o.status)).length;
+    final cancelledCount = _orders.where((o) => o.status == 'cancelled').length;
+    final finishedOrderCount = _orders
+        .where((o) => o.status == 'delivered' || o.status == 'cancelled')
+        .length;
     final hasQuery = _searchController.text.trim().isNotEmpty;
 
     return SafeArea(
@@ -282,14 +292,33 @@ class _OrdersScreenState extends State<OrdersScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'My orders',
-                      style: TextStyle(
-                        color: textDark,
-                        fontSize: 29,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -.6,
-                      ),
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'My orders',
+                            style: TextStyle(
+                              color: textDark,
+                              fontSize: 29,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: -.6,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Refresh orders',
+                          onPressed: _refreshing ? null : _loadOrders,
+                          icon: _refreshing
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.refresh_rounded),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 5),
                     const Text(
@@ -301,7 +330,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
                       activeCount: activeCount,
                       completedCount: deliveredCount,
                       onActiveTap: () => _selectFilter(_OrderFilter.inProgress),
-                      onCompletedTap: () => _selectFilter(_OrderFilter.delivered),
+                      onCompletedTap: () =>
+                          _selectFilter(_OrderFilter.delivered),
                     ),
                   ],
                 ),
@@ -310,26 +340,54 @@ class _OrdersScreenState extends State<OrdersScreen> {
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 13),
-                child: Row(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Expanded(
-                      child: Text(
-                        'Order history',
-                        style: TextStyle(
-                          color: textDark,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w800,
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Order history',
+                            style: TextStyle(
+                              color: textDark,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          '${visible.length} ${visible.length == 1 ? 'order' : 'orders'}',
+                          style: const TextStyle(
+                            color: textGray,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (finishedOrderCount > 0) ...[
+                      const SizedBox(height: 6),
+                      TextButton.icon(
+                        onPressed: _clearingFinishedOrders
+                            ? null
+                            : _clearFinishedOrders,
+                        icon: _clearingFinishedOrders
+                            ? const SizedBox(
+                                width: 15,
+                                height: 15,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.cleaning_services_outlined,
+                                size: 17,
+                              ),
+                        label: const Text(
+                          'Clear all finished and cancelled orders',
                         ),
                       ),
-                    ),
-                    Text(
-                      '${visible.length} ${visible.length == 1 ? 'order' : 'orders'}',
-                      style: const TextStyle(
-                        color: textGray,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -451,9 +509,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
                       key: ValueKey(order.id),
                       order: order,
                       onTap: () => _openOrder(order),
-                      onDelete: order.status == 'cancelled'
-                          ? () => _dismissCancelledOrder(order)
-                          : null,
                     );
                   },
                 ),
@@ -464,14 +519,21 @@ class _OrdersScreenState extends State<OrdersScreen> {
     );
   }
 
-  Future<void> _dismissCancelledOrder(CustomerOrder order) async {
+  Future<void> _clearFinishedOrders() async {
+    final ordersToHide = _orders
+        .where(
+          (order) => order.status == 'delivered' || order.status == 'cancelled',
+        )
+        .toList(growable: false);
+    if (ordersToHide.isEmpty || _clearingFinishedOrders) return;
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Remove cancelled order?'),
+        title: const Text('Clear finished and cancelled orders?'),
         content: const Text(
-          'This will remove the order from your history. The station and '
-          'payment records will be kept.',
+          'This hides delivered and cancelled orders from your history. '
+          'Active orders and all order/payment records will be kept.',
         ),
         actions: [
           TextButton(
@@ -480,31 +542,46 @@ class _OrdersScreenState extends State<OrdersScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Remove'),
+            child: const Text('Clear orders'),
           ),
         ],
       ),
     );
     if (confirmed != true || !mounted) return;
 
+    setState(() => _clearingFinishedOrders = true);
     try {
-      await SupabaseService.dismissCancelledCustomerOrder(order.id);
+      await SupabaseService.dismissFinishedCustomerOrders(
+        ordersToHide.map((order) => order.id).toList(growable: false),
+      );
       if (!mounted) return;
       setState(() {
-        _orders = _orders.where((item) => item.id != order.id).toList();
+        final hiddenIds = ordersToHide.map((order) => order.id).toSet();
+        _orders = _orders
+            .where((item) => !hiddenIds.contains(item.id))
+            .toList();
       });
+      final onOrdersChanged = widget.onOrdersChanged;
+      if (onOrdersChanged != null) unawaited(onOrdersChanged());
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(content: Text('Cancelled order removed from history.')),
+          SnackBar(
+            content: Text(
+              '${ordersToHide.length} finished or cancelled '
+              '${ordersToHide.length == 1 ? 'order' : 'orders'} cleared.',
+            ),
+          ),
         );
     } on Exception catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          SnackBar(content: Text('Could not remove the order: $error')),
+          SnackBar(content: Text('Could not clear orders: $error')),
         );
+    } finally {
+      if (mounted) setState(() => _clearingFinishedOrders = false);
     }
   }
 }
@@ -734,16 +811,10 @@ class _FilterPill extends StatelessWidget {
 }
 
 class _OrderCard extends StatelessWidget {
-  const _OrderCard({
-    super.key,
-    required this.order,
-    required this.onTap,
-    this.onDelete,
-  });
+  const _OrderCard({super.key, required this.order, required this.onTap});
 
   final CustomerOrder order;
   final VoidCallback onTap;
-  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -892,7 +963,11 @@ class _OrderCard extends StatelessWidget {
                   ),
                   child: const Row(
                     children: [
-                      Icon(Icons.hourglass_top_rounded, size: 15, color: _amber),
+                      Icon(
+                        Icons.hourglass_top_rounded,
+                        size: 15,
+                        color: _amber,
+                      ),
                       SizedBox(width: 8),
                       Expanded(
                         child: Text(
@@ -931,28 +1006,11 @@ class _OrderCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  if (onDelete != null)
-                    InkWell(
-                      onTap: onDelete,
-                      borderRadius: BorderRadius.circular(10),
-                      child: const Padding(
-                        padding: EdgeInsets.all(6),
-                        child: Tooltip(
-                          message: 'Remove from history',
-                          child: Icon(
-                            Icons.delete_outline_rounded,
-                            color: textGray,
-                            size: 20,
-                          ),
-                        ),
-                      ),
-                    )
-                  else
-                    const Icon(
-                      Icons.arrow_forward_rounded,
-                      color: primaryBlue,
-                      size: 17,
-                    ),
+                  const Icon(
+                    Icons.arrow_forward_rounded,
+                    color: primaryBlue,
+                    size: 17,
+                  ),
                 ],
               ),
             ],
@@ -1075,12 +1133,16 @@ class _OrderDetailsScreenState extends State<_OrderDetailsScreen> {
   late CustomerOrder _order = widget.order;
   RealtimeChannel? _orderChannel;
   bool _checkingPayment = false;
+  bool _refreshingOrder = false;
+  int _orderRefreshSequence = 0;
 
   bool get _canCheckPayment =>
       _order.paymentMethod == 'paymongo' &&
-      !const {'paid', 'partially_refunded', 'refunded'}.contains(
-        _order.paymentStatus,
-      );
+      !const {
+        'paid',
+        'partially_refunded',
+        'refunded',
+      }.contains(_order.paymentStatus);
 
   @override
   void initState() {
@@ -1110,14 +1172,27 @@ class _OrderDetailsScreenState extends State<_OrderDetailsScreen> {
     super.dispose();
   }
 
-  Future<void> _refreshOrder() async {
+  Future<void> _refreshOrder({bool showError = false}) async {
+    final sequence = ++_orderRefreshSequence;
+    if (mounted) setState(() => _refreshingOrder = true);
     try {
       final orders = await SupabaseService.getCustomerOrders();
-      if (!mounted) return;
+      if (!mounted || sequence != _orderRefreshSequence) return;
       final updated = orders.where((order) => order.id == widget.order.id);
       if (updated.isNotEmpty) setState(() => _order = updated.first);
-    } on Exception {
-      // Keep showing the last known order; realtime will retry on next change.
+    } on Exception catch (error) {
+      if (!mounted || sequence != _orderRefreshSequence) return;
+      if (showError) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(content: Text('Could not refresh order: $error')),
+          );
+      }
+    } finally {
+      if (mounted && sequence == _orderRefreshSequence) {
+        setState(() => _refreshingOrder = false);
+      }
     }
   }
 
@@ -1219,9 +1294,24 @@ class _OrderDetailsScreenState extends State<_OrderDetailsScreen> {
             fontWeight: FontWeight.w800,
           ),
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh order',
+            onPressed: _refreshingOrder
+                ? null
+                : () => _refreshOrder(showError: true),
+            icon: _refreshingOrder
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh_rounded, color: textDark),
+          ),
+        ],
       ),
       body: RefreshIndicator(
-        onRefresh: _refreshOrder,
+        onRefresh: () => _refreshOrder(showError: true),
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(
             parent: BouncingScrollPhysics(),
@@ -1360,11 +1450,7 @@ class _DetailHeader extends StatelessWidget {
                 tooltip: 'Copy order number',
                 visualDensity: VisualDensity.compact,
                 onPressed: onCopy,
-                icon: const Icon(
-                  Icons.copy_rounded,
-                  size: 19,
-                  color: textGray,
-                ),
+                icon: const Icon(Icons.copy_rounded, size: 19, color: textGray),
               ),
             ],
           ),
@@ -1425,11 +1511,7 @@ class _DeliveryProgress extends StatelessWidget {
       ('Confirmed', 'The station accepted it', Icons.check_circle_rounded),
       ('Preparing', 'Your water is being prepared', Icons.inventory_2_rounded),
       ('Ready', 'Packed and ready to go', Icons.water_drop_rounded),
-      (
-        'Out for delivery',
-        'On the way to you',
-        Icons.local_shipping_rounded,
-      ),
+      ('Out for delivery', 'On the way to you', Icons.local_shipping_rounded),
       ('Delivered', 'Enjoy your fresh water', Icons.home_rounded),
     ];
 

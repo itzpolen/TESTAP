@@ -5,13 +5,20 @@ import 'location_flow_screen.dart';
 
 /// AquaDirect onboarding: one screen that explains the marketplace.
 ///
-/// Motion (all one-shot, nothing loops):
-///  - Intro: the art layers and the copy slide up in a staggered sequence,
-///    each layer at its own speed, which reads as depth.
-///  - Parallax: touching or dragging shifts the layers by different amounts
-///    and they ease back when released. Mouse hover works the same on desktop.
-///  - Outro: tapping the button slides the copy down and the art up and away
-///    before the location step opens.
+/// Motion is slide-only and one-shot. Nothing loops, nothing follows the
+/// finger, and no controller is created anywhere in this file. Every piece
+/// uses an implicit animation (TweenAnimationBuilder): it is told where it
+/// starts and how long to wait, and it slides into place by itself.
+///
+///  - Intro: the logo drops down, the map rises, the station pins slide in
+///    from the left, right and top, the headline and text slide in from the
+///    left, the chips slide in from the right one by one, and the button and
+///    note rise last. Each piece has its own delay, so it reads as a sequence.
+///  - Outro: tapping the button slides everything back out the way it came,
+///    bottom items first, before the location step opens.
+///
+/// Respects the system "reduce motion" setting: everything is shown in place
+/// and the screen changes without any movement.
 ///
 /// The art is drawn in code, so no image assets are required. To use your own
 /// illustration instead of the map, pass [heroImageAsset].
@@ -25,83 +32,21 @@ class OnboardingScreen extends StatefulWidget {
   State<OnboardingScreen> createState() => _OnboardingScreenState();
 }
 
-class _OnboardingScreenState extends State<OnboardingScreen>
-    with TickerProviderStateMixin {
+// ------------------------------------------------------------------ timing
+
+/// How long one piece takes to slide out. Each piece may add its own delay.
+const Duration _exitDuration = Duration(milliseconds: 460);
+
+/// The longest exit delay used below, so navigation waits for the last piece.
+const Duration _longestExitDelay = Duration(milliseconds: 160);
+
+class _OnboardingScreenState extends State<OnboardingScreen> {
   static const Color navy = Color(0xFF10294B);
   static const Color blue = Color(0xFF2478F2);
   static const Color muted = Color(0xFF718096);
   static const Color hairline = Color(0xFFDCE9F8);
 
-  late final AnimationController _intro = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1500),
-  );
-  late final AnimationController _outro = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 560),
-  );
-  late final AnimationController _settle = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 700),
-  );
-
-  /// Normalised pointer position, -1..1 on both axes. Drives the parallax.
-  final ValueNotifier<Offset> _tilt = ValueNotifier(Offset.zero);
-  Offset _settleFrom = Offset.zero;
-  bool _introStarted = false;
   bool _leaving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _settle.addListener(() {
-      _tilt.value = Offset.lerp(
-        _settleFrom,
-        Offset.zero,
-        Curves.easeOutCubic.transform(_settle.value),
-      )!;
-    });
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_introStarted) return;
-    _introStarted = true;
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _intro.value = 1;
-    } else {
-      _intro.forward();
-    }
-  }
-
-  @override
-  void dispose() {
-    _intro.dispose();
-    _outro.dispose();
-    _settle.dispose();
-    _tilt.dispose();
-    super.dispose();
-  }
-
-  // ------------------------------------------------------------ parallax
-
-  void _onPointer(Offset position, Size size) {
-    if (_leaving || MediaQuery.disableAnimationsOf(context)) return;
-    _settle.stop();
-    final target = Offset(
-      (((position.dx / size.width) - .5) * 2).clamp(-1.0, 1.0),
-      (((position.dy / size.height) - .5) * 2).clamp(-1.0, 1.0),
-    );
-    _tilt.value = Offset.lerp(_tilt.value, target, .35)!;
-  }
-
-  void _release() {
-    _settleFrom = _tilt.value;
-    _settle
-      ..reset()
-      ..forward();
-  }
 
   // ------------------------------------------------------------ navigation
 
@@ -109,7 +54,13 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     if (_leaving) return;
     final reduce = MediaQuery.disableAnimationsOf(context);
     setState(() => _leaving = true);
-    if (!reduce) await _outro.forward();
+    // The exit plays by itself once _leaving flips. Wait for the slowest piece
+    // to finish, plus a couple of frames, before the next screen takes over.
+    if (!reduce) {
+      await Future<void>.delayed(
+        _exitDuration + _longestExitDelay + const Duration(milliseconds: 40),
+      );
+    }
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       PageRouteBuilder<void>(
@@ -125,80 +76,22 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     );
   }
 
-  // ------------------------------------------------------------ motion math
-
-  /// Eased 0..1 progress of [t] between [begin] and [end].
-  double _seg(
-    double t,
-    double begin,
-    double end, [
-    Curve curve = Curves.easeOutCubic,
-  ]) => curve.transform(((t - begin) / (end - begin)).clamp(0.0, 1.0));
-
-  /// One parallax layer: slides up while fading in, shifts with the pointer by
-  /// [depth], and lifts away on exit by [lift] (deeper layers move more).
-  Widget _layer({
-    required double depth,
-    required double begin,
-    required double end,
-    required double rise,
-    required double lift,
+  /// Shorthand for one slide: where it starts, how long it waits, how long it
+  /// takes, and how long it waits before leaving.
+  Widget _slide({
+    required Offset from,
+    required int delay,
     required Widget child,
-    double pop = 0,
-  }) {
-    final enter = _seg(_intro.value, begin, end);
-    final leave = _seg(_outro.value, 0, 1, Curves.easeInCubic);
-    final tilt = _tilt.value;
-    final dy = (1 - enter) * rise - leave * lift + tilt.dy * depth * 9;
-    final dx = tilt.dx * depth * 14;
-    Widget moved = Transform.translate(offset: Offset(dx, dy), child: child);
-    if (pop > 0) {
-      moved = Transform.scale(
-        scale: (1 - pop) + pop * enter,
-        alignment: Alignment.bottomCenter,
-        child: moved,
-      );
-    }
-    return Opacity(
-      opacity: (enter * (1 - leave)).clamp(0.0, 1.0),
-      child: moved,
-    );
-  }
-
-  /// One line of copy: slides up in sequence, slides down on exit.
-  Widget _reveal(int index, Widget child) {
-    final enter = _seg(_intro.value, .32 + index * .055, .72 + index * .055);
-    final leave = _seg(
-      _outro.value,
-      index * .05,
-      .75 + index * .05,
-      Curves.easeInCubic,
-    );
-    return Opacity(
-      opacity: (enter * (1 - leave)).clamp(0.0, 1.0),
-      child: Transform.translate(
-        offset: Offset(0, (1 - enter) * 28 + leave * 36),
-        child: child,
-      ),
-    );
-  }
-
-  Widget _revealRight(int index, Widget child) {
-    final enter = _seg(_intro.value, .32 + index * .16, .67 + index * .16);
-    final leave = _seg(
-      _outro.value,
-      index * .05,
-      .75 + index * .05,
-      Curves.easeInCubic,
-    );
-    return Opacity(
-      opacity: (enter * (1 - leave)).clamp(0.0, 1.0),
-      child: Transform.translate(
-        offset: Offset((1 - enter) * -28 - leave * 24, 0),
-        child: child,
-      ),
-    );
-  }
+    int ms = 700,
+    int exitDelay = 0,
+  }) => _Slide(
+    leaving: _leaving,
+    from: from,
+    delay: Duration(milliseconds: delay),
+    duration: Duration(milliseconds: ms),
+    exitDelay: Duration(milliseconds: exitDelay),
+    child: child,
+  );
 
   // ------------------------------------------------------------ build
 
@@ -216,53 +109,28 @@ class _OnboardingScreenState extends State<OnboardingScreen>
 
     return Scaffold(
       backgroundColor: Colors.white,
-      body: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onPanStart: (details) => _onPointer(details.localPosition, size),
-        onPanUpdate: (details) => _onPointer(details.localPosition, size),
-        onPanEnd: (_) => _release(),
-        onPanCancel: _release,
-        child: MouseRegion(
-          onHover: (event) => _onPointer(event.localPosition, size),
-          onExit: (_) => _release(),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              const DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Color(0xFFE8F2FF),
-                      Color(0xFFF6FAFF),
-                      Colors.white,
-                    ],
-                    stops: [0, .45, .74],
-                  ),
-                ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xFFE8F2FF), Color(0xFFF6FAFF), Colors.white],
+                stops: [0, .45, .74],
               ),
-              AnimatedBuilder(
-                animation: Listenable.merge([_intro, _outro, _tilt]),
-                builder: (context, _) => Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ExcludeSemantics(
-                      child: _buildArt(size, plateTop, plateHeight),
-                    ),
-                    _buildTopBar(padding.top),
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: _buildContent(padding.bottom, compact),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
+          ExcludeSemantics(child: _buildArt(plateTop, plateHeight)),
+          _buildTopBar(padding.top),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: _buildContent(padding.bottom, compact),
+          ),
+        ],
       ),
     );
   }
@@ -271,11 +139,11 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     top: 0,
     left: 0,
     right: 0,
-    child: Opacity(
-      opacity: (_seg(_intro.value, .04, .4) * (1 - _outro.value)).clamp(
-        0.0,
-        1.0,
-      ),
+    child: _slide(
+      from: const Offset(0, -18),
+      delay: 0,
+      ms: 600,
+      exitDelay: 120,
       child: Padding(
         padding: EdgeInsets.fromLTRB(24, topInset + 18, 24, 0),
         child: RichText(
@@ -308,32 +176,30 @@ class _OnboardingScreenState extends State<OnboardingScreen>
 
   // ------------------------------------------------------------ art
 
-  Widget _buildArt(Size size, double plateTop, double plateHeight) {
+  Widget _buildArt(double plateTop, double plateHeight) {
     final hero = widget.heroImageAsset;
     return Stack(
       fit: StackFit.expand,
       children: [
-        // Far layer: soft halo behind everything.
-        _layer(
-          depth: .3,
-          begin: 0,
-          end: .45,
-          rise: 0,
-          lift: 24,
+        // Soft halo behind everything: fades in without moving.
+        _slide(
+          from: Offset.zero,
+          delay: 0,
+          ms: 900,
+          exitDelay: 120,
           child: const CustomPaint(painter: _HaloPainter()),
         ),
-        // Mid layer: the map.
+        // The map rises from below.
         Positioned(
           left: 24,
           right: 24,
           top: plateTop,
           height: plateHeight,
-          child: _layer(
-            depth: .8,
-            begin: .08,
-            end: .6,
-            rise: 46,
-            lift: 70,
+          child: _slide(
+            from: const Offset(0, 56),
+            delay: 120,
+            ms: 850,
+            exitDelay: 80,
             child: DecoratedBox(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(30),
@@ -364,7 +230,8 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             ),
           ),
         ),
-        // Near layer: station pins and the "you are here" marker.
+        // Station pins and the "you are here" dot: each slides in from a
+        // different side, one after another.
         if (hero == null)
           Positioned(
             left: 24,
@@ -373,54 +240,64 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             height: plateHeight,
             child: Stack(
               children: [
-                _pin(const Alignment(-.55, -.42), '0.8 km', 0),
-                _pin(const Alignment(.58, -.5), '1.2 km', 1),
-                _pin(const Alignment(.52, .5), '2.1 km', 2),
+                Align(
+                  alignment: const Alignment(-.55, -.42),
+                  child: _slide(
+                    from: const Offset(-44, 0),
+                    delay: 520,
+                    ms: 700,
+                    exitDelay: 40,
+                    child: const _StationPin(label: '0.8 km'),
+                  ),
+                ),
+                Align(
+                  alignment: const Alignment(.58, -.5),
+                  child: _slide(
+                    from: const Offset(44, 0),
+                    delay: 640,
+                    ms: 700,
+                    exitDelay: 40,
+                    child: const _StationPin(label: '1.2 km'),
+                  ),
+                ),
+                Align(
+                  alignment: const Alignment(.52, .5),
+                  child: _slide(
+                    from: const Offset(0, -40),
+                    delay: 760,
+                    ms: 700,
+                    exitDelay: 40,
+                    child: const _StationPin(label: '2.1 km'),
+                  ),
+                ),
                 Align(
                   alignment: const Alignment(0, .12),
-                  child: _layer(
-                    depth: 1.1,
-                    begin: .3,
-                    end: .62,
-                    rise: 24,
-                    lift: 80,
-                    pop: .5,
+                  child: _slide(
+                    from: const Offset(0, 18),
+                    delay: 560,
+                    ms: 600,
+                    exitDelay: 40,
                     child: const _YouAreHere(),
                   ),
                 ),
               ],
             ),
           ),
-        // Front layer: a station card overlapping the map's lower edge.
+        // A station card overlapping the map's lower edge rises last.
         Positioned(
           left: 46,
           right: 46,
           top: plateTop + plateHeight - 34,
-          child: _layer(
-            depth: 1.7,
-            begin: .45,
-            end: .85,
-            rise: 64,
-            lift: 110,
+          child: _slide(
+            from: const Offset(0, 72),
+            delay: 800,
+            ms: 800,
             child: const _StationPreviewCard(),
           ),
         ),
       ],
     );
   }
-
-  Widget _pin(Alignment alignment, String label, int index) => Align(
-    alignment: alignment,
-    child: _layer(
-      depth: 1.3,
-      begin: .26 + index * .07,
-      end: .6 + index * .07,
-      rise: 34,
-      lift: 90,
-      pop: .45,
-      child: _StationPin(label: label),
-    ),
-  );
 
   // ------------------------------------------------------------ content
 
@@ -437,9 +314,12 @@ class _OnboardingScreenState extends State<OnboardingScreen>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _revealRight(
-            0,
-            Column(
+          // Headline and text slide in from the left.
+          _slide(
+            from: const Offset(-36, 0),
+            delay: 380,
+            exitDelay: 80,
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
@@ -466,9 +346,11 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             ),
           ),
           SizedBox(height: compact ? 10 : 14),
-          _revealRight(
-            1,
-            Text(
+          _slide(
+            from: const Offset(-36, 0),
+            delay: 520,
+            exitDelay: 60,
+            child: Text(
               'Compare nearby refilling stations, order a refill or a new gallon, and pay on delivery.',
               style: GoogleFonts.manrope(
                 color: muted,
@@ -479,33 +361,55 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             ),
           ),
           SizedBox(height: compact ? 14 : 18),
-          _reveal(
-            3,
-            const Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _FeatureChip(
+          // Chips slide in from the right, one by one.
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _slide(
+                from: const Offset(40, 0),
+                delay: 700,
+                ms: 600,
+                exitDelay: 40,
+                child: const _FeatureChip(
                   icon: Icons.verified_rounded,
                   label: 'Verified stations',
                 ),
-                _FeatureChip(
+              ),
+              _slide(
+                from: const Offset(40, 0),
+                delay: 790,
+                ms: 600,
+                exitDelay: 20,
+                child: const _FeatureChip(
                   icon: Icons.water_drop_rounded,
                   label: 'Refill or new gallon',
                 ),
-                _FeatureChip(
+              ),
+              _slide(
+                from: const Offset(40, 0),
+                delay: 880,
+                ms: 600,
+                child: const _FeatureChip(
                   icon: Icons.payments_rounded,
                   label: 'Pay on delivery',
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
           SizedBox(height: compact ? 18 : 24),
-          _reveal(4, _StartButton(onPressed: _leaving ? null : _start)),
+          // Button and note rise from the bottom last.
+          _slide(
+            from: const Offset(0, 44),
+            delay: 1000,
+            child: _StartButton(onPressed: _leaving ? null : _start),
+          ),
           const SizedBox(height: 14),
-          _reveal(
-            5,
-            Center(
+          _slide(
+            from: const Offset(0, 24),
+            delay: 1140,
+            ms: 600,
+            child: Center(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -528,6 +432,69 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// MOTION
+// ============================================================
+
+/// One slide with no controller to manage.
+///
+/// On first build the child waits [delay], then slides from [from] to its
+/// place while fading in. When [leaving] becomes true it waits [exitDelay]
+/// and slides back toward [from] while fading out.
+///
+/// The child is cached on its own layer, so while it moves it is only
+/// shifted, never repainted. That is what keeps the motion smooth.
+class _Slide extends StatelessWidget {
+  const _Slide({
+    required this.leaving,
+    required this.from,
+    required this.delay,
+    required this.duration,
+    required this.exitDelay,
+    required this.child,
+  });
+
+  final bool leaving;
+  final Offset from;
+  final Duration delay;
+  final Duration duration;
+  final Duration exitDelay;
+  final Widget child;
+
+  /// The delay is the first part of the animation, where nothing moves yet.
+  static Curve _after(Duration wait, Duration total, Curve curve) => Interval(
+    wait.inMilliseconds / total.inMilliseconds,
+    1,
+    curve: curve,
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final reduce = MediaQuery.disableAnimationsOf(context);
+    final enterTotal = delay + duration;
+    final exitTotal = _exitDuration + exitDelay;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: reduce ? 1.0 : 0.0, end: 1.0),
+      duration: reduce ? Duration.zero : enterTotal,
+      curve: _after(delay, enterTotal, Curves.easeOutCubic),
+      child: RepaintBoundary(child: child),
+      builder: (context, appear, cached) => TweenAnimationBuilder<double>(
+        tween: Tween<double>(end: leaving ? 1.0 : 0.0),
+        duration: reduce ? Duration.zero : exitTotal,
+        curve: _after(exitDelay, exitTotal, Curves.easeInCubic),
+        child: cached,
+        builder: (context, vanish, cached) => Opacity(
+          opacity: (appear * (1 - vanish)).clamp(0.0, 1.0),
+          child: Transform.translate(
+            offset: from * ((1 - appear) + vanish),
+            child: cached,
+          ),
+        ),
       ),
     );
   }

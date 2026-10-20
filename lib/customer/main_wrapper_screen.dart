@@ -26,7 +26,7 @@ class MainWrapperScreen extends StatefulWidget {
 class _MainWrapperScreenState extends State<MainWrapperScreen>
     with WidgetsBindingObserver {
   static const _homeIndex = 0;
- // static const _ordersIndex = 2;
+  // static const _ordersIndex = 2;
   static const _trackIndex = 3;
 
   int index = _homeIndex;
@@ -153,11 +153,12 @@ class _MainWrapperScreenState extends State<MainWrapperScreen>
       onCartChanged: _refreshCartCount,
     ),
     1 => StationScreen(
+      buildMainWrapper: () => const MainWrapperScreen(),
       initialBrowsingLocation: _browsingLocation,
       onBrowsingLocationChanged: _updateBrowsingLocation,
       onCartChanged: _refreshCartCount,
     ),
-    2 => const OrdersScreen(),
+    2 => OrdersScreen(onOrdersChanged: _refreshActiveOrders),
     3 => const TrackScreen(),
     _ => const ProfileScreen(),
   };

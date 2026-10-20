@@ -41,6 +41,7 @@ with check (
     select 1 from public.orders o
     where o.id = order_id
       and (select public.is_station_member(o.station_id))
+      and o.status in ('delivered', 'cancelled')
   )
 );
 
@@ -1807,6 +1808,49 @@ begin
   return new;
 end;
 $$;
+
+create or replace function public.confirm_paid_paymongo_order()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  previous_order_transition text := current_setting('app.order_transition', true);
+  previous_order_transition_note text := current_setting('app.order_transition_note', true);
+begin
+  if new.method <> 'paymongo' or new.status <> 'paid' then
+    return new;
+  end if;
+
+  perform set_config('app.order_transition', 'on', true);
+  perform set_config(
+    'app.order_transition_note',
+    'PayMongo payment received; order automatically confirmed',
+    true
+  );
+  update public.orders
+  set status = 'confirmed',
+      accepted_at = coalesce(accepted_at, now()),
+      acceptance_expires_at = null
+  where id = new.order_id
+    and payment_method = 'paymongo'
+    and status = 'pending';
+  perform set_config(
+    'app.order_transition',
+    coalesce(previous_order_transition, ''),
+    true
+  );
+  perform set_config(
+    'app.order_transition_note',
+    coalesce(previous_order_transition_note, ''),
+    true
+  );
+  return new;
+end;
+$$;
+revoke all on function public.confirm_paid_paymongo_order()
+  from public, anon, authenticated;
 
 create or replace function public.enforce_review_owner_update()
 returns trigger
@@ -5474,6 +5518,16 @@ create trigger enforce_payment_transition
   before update of status on public.payments
   for each row execute function public.enforce_payment_transition();
 
+create trigger confirm_paid_paymongo_order
+  after update of status on public.payments
+  for each row
+  when (
+    old.status is distinct from new.status
+    and new.status = 'paid'
+    and new.method = 'paymongo'
+  )
+  execute function public.confirm_paid_paymongo_order();
+
 create trigger enforce_review_owner_update
   before insert or update on public.station_reviews
   for each row execute function public.enforce_review_owner_update();
@@ -5918,7 +5972,7 @@ create policy "Customers station members and admins view orders"
 create policy "Customers view their order dismissals"
   on public.customer_order_dismissals for select to authenticated
   using (user_id = (select auth.uid()));
-create policy "Customers dismiss their cancelled orders"
+create policy "Customers hide finished orders"
   on public.customer_order_dismissals for insert to authenticated
   with check (
     user_id = (select auth.uid())
@@ -5927,7 +5981,7 @@ create policy "Customers dismiss their cancelled orders"
       from public.orders o
       where o.id = order_id
         and o.customer_id = (select auth.uid())
-        and o.status = 'cancelled'
+        and o.status in ('delivered', 'cancelled')
     )
   );
 

@@ -21,7 +21,8 @@ class _TrackScreenState extends State<TrackScreen> {
   String? _selectedOrderId;
   String? _error;
   bool _loading = true;
-  bool _requestInProgress = false;
+  bool _refreshing = false;
+  int _loadSequence = 0;
   Timer? _refreshTimer;
   RealtimeChannel? _ordersChannel;
 
@@ -62,18 +63,25 @@ class _TrackScreenState extends State<TrackScreen> {
     super.dispose();
   }
 
-  Future<void> _loadTracking({bool showLoading = true}) async {
-    if (_requestInProgress) return;
-    _requestInProgress = true;
+  Future<void> _loadTracking({
+    bool showLoading = true,
+    bool showRefreshing = false,
+  }) async {
+    final sequence = ++_loadSequence;
     if (showLoading && mounted) {
       setState(() {
         _loading = true;
         _error = null;
       });
+    } else if (showRefreshing && mounted) {
+      setState(() {
+        _refreshing = true;
+        _error = null;
+      });
     }
     try {
       final tracking = await SupabaseService.getCustomerOrderTracking();
-      if (!mounted) return;
+      if (!mounted || sequence != _loadSequence) return;
       setState(() {
         _tracking = tracking;
         _selectedOrderId =
@@ -81,18 +89,25 @@ class _TrackScreenState extends State<TrackScreen> {
             ? _selectedOrderId
             : tracking.firstOrNull?.order.id;
         _loading = false;
+        _refreshing = false;
         _error = null;
       });
     } on Exception catch (error) {
-      if (!mounted) return;
+      if (!mounted || sequence != _loadSequence) return;
       setState(() {
         _loading = false;
+        _refreshing = false;
         _error = error.toString();
       });
     } finally {
-      _requestInProgress = false;
+      if (mounted && sequence == _loadSequence && _refreshing) {
+        setState(() => _refreshing = false);
+      }
     }
   }
+
+  Future<void> _refreshTracking() =>
+      _loadTracking(showLoading: false, showRefreshing: true);
 
   CustomerDeliveryTracking? get _selectedTracking {
     for (final item in _tracking) {
@@ -110,14 +125,14 @@ class _TrackScreenState extends State<TrackScreen> {
     }
     if (_error != null && _tracking.isEmpty) {
       return SafeArea(
-        child: _TrackingError(message: _error!, onRetry: _loadTracking),
+        child: _TrackingError(message: _error!, onRetry: _refreshTracking),
       );
     }
 
     final selected = _selectedTracking;
     return SafeArea(
       child: RefreshIndicator(
-        onRefresh: _loadTracking,
+        onRefresh: _refreshTracking,
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
@@ -148,8 +163,8 @@ class _TrackScreenState extends State<TrackScreen> {
                     ),
                     IconButton(
                       tooltip: 'Refresh tracking',
-                      onPressed: _loading ? null : _loadTracking,
-                      icon: _loading
+                      onPressed: _refreshing ? null : _refreshTracking,
+                      icon: _refreshing
                           ? const SizedBox(
                               width: 20,
                               height: 20,

@@ -2103,8 +2103,8 @@ class _CheckoutScreenState extends State<CheckoutScreen>
 
 String _friendlyCheckoutError(Object error) {
   final message = error.toString().replaceFirst('Exception: ', '');
-  if (message.contains('paymongotestmodekys')) {
-    return 'PayMongo is not configured yet. Add paymongotestmodekys, '
+  if (message.contains('PAYMONGO_KEY')) {
+    return 'PayMongo is not configured yet. Add PAYMONGO_KEY, '
         'PAYMONGO_SUCCESS_URL and PAYMONGO_CANCEL_URL to your Supabase '
         'Edge Function secrets, then retry payment for this order.';
   }

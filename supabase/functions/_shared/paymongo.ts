@@ -2,8 +2,8 @@ export async function paymongoRequest(
   path: string,
   options: { method?: string; body?: unknown; idempotencyKey?: string } = {},
 ) {
-  const secret = Deno.env.get("paymongotestmodekys");
-  if (!secret) throw new Error("paymongotestmodekys is required");
+  const secret = Deno.env.get("PAYMONGO_KEY");
+  if (!secret) throw new Error("PAYMONGO_KEY is required");
 
   const headers: Record<string, string> = {
     Authorization: `Basic ${btoa(`${secret}:`)}`,

@@ -12,6 +12,8 @@ import '../models/station_social_links.dart';
 import '../services/location_service.dart';
 import '../services/nearby_empty_states.dart';
 import '../services/supabase_service.dart';
+import 'cart_checkout_screen.dart';
+//import 'cart_checkout_screen_qr.dart' as qr_checkout;
 import 'location_flow_screen.dart';
 
 const _stationCanvas = Color(0xFFF5F8FC);
@@ -58,12 +60,14 @@ class StationScreen extends StatelessWidget {
     this.initialBrowsingLocation,
     this.onBrowsingLocationChanged,
     this.onCartChanged,
+    required this.buildMainWrapper,
   });
 
   final NearbyStation? station;
   final DeliveryLocation? initialBrowsingLocation;
   final ValueChanged<DeliveryLocation>? onBrowsingLocationChanged;
   final VoidCallback? onCartChanged;
+  final Widget Function() buildMainWrapper;
 
   @override
   Widget build(BuildContext context) {
@@ -73,12 +77,14 @@ class StationScreen extends StatelessWidget {
         station: selectedStation,
         deliveryLocation: initialBrowsingLocation,
         onCartChanged: onCartChanged,
+        buildMainWrapper: buildMainWrapper,
       );
     }
     return _StationDirectory(
       initialBrowsingLocation: initialBrowsingLocation,
       onBrowsingLocationChanged: onBrowsingLocationChanged,
       onCartChanged: onCartChanged,
+      buildMainWrapper: buildMainWrapper,
     );
   }
 }
@@ -92,11 +98,13 @@ class _StationDirectory extends StatefulWidget {
     this.initialBrowsingLocation,
     this.onBrowsingLocationChanged,
     this.onCartChanged,
+    required this.buildMainWrapper,
   });
 
   final DeliveryLocation? initialBrowsingLocation;
   final ValueChanged<DeliveryLocation>? onBrowsingLocationChanged;
   final VoidCallback? onCartChanged;
+  final Widget Function() buildMainWrapper;
 
   @override
   State<_StationDirectory> createState() => _StationDirectoryState();
@@ -274,16 +282,18 @@ class _StationDirectoryState extends State<_StationDirectory> {
     return results;
   }
 
-  void _openStation(NearbyStation station) {
-    Navigator.of(context).push<void>(
+  Future<void> _openStation(NearbyStation station) async {
+    await Navigator.of(context).push<void>(
       MaterialPageRoute(
         builder: (_) => StationScreen(
           station: station,
           initialBrowsingLocation: _location,
           onCartChanged: widget.onCartChanged,
+          buildMainWrapper: widget.buildMainWrapper,
         ),
       ),
     );
+    if (mounted) await _loadStations();
   }
 
   @override
@@ -516,11 +526,13 @@ class _StationStorefront extends StatefulWidget {
     required this.station,
     this.deliveryLocation,
     this.onCartChanged,
+    required this.buildMainWrapper,
   });
 
   final NearbyStation station;
   final DeliveryLocation? deliveryLocation;
   final VoidCallback? onCartChanged;
+  final Widget Function() buildMainWrapper;
 
   @override
   State<_StationStorefront> createState() => _StationStorefrontState();
@@ -532,6 +544,8 @@ class _StationStorefrontState extends State<_StationStorefront> {
   String? _contactPhone;
   String? _contactError;
   bool _loadingContact = true;
+  double? _ratingAverage;
+  late int _ratingCount;
   StationSocialLinks? _socialLinks;
   String? _socialLinksError;
   bool _loadingSocialLinks = true;
@@ -542,6 +556,8 @@ class _StationStorefrontState extends State<_StationStorefront> {
   @override
   void initState() {
     super.initState();
+    _ratingAverage = widget.station.ratingAverage;
+    _ratingCount = widget.station.ratingCount;
     _loadDeliveryInfo();
     _loadContactPhone();
     _loadSocialLinks();
@@ -687,7 +703,6 @@ class _StationStorefrontState extends State<_StationStorefront> {
       if (station.province?.trim().isNotEmpty == true) station.province!,
     ].join(', ');
     final imageUrl = _publicImageUrl(station.logoPath);
-    final hasRating = station.ratingCount > 0 && station.ratingAverage != null;
     final hoursLabel = _info?.hoursLabel(
       DateTime.now(),
       isOpen: station.isOpen,
@@ -790,8 +805,20 @@ class _StationStorefrontState extends State<_StationStorefront> {
                   _StorefrontSummary(
                     station: station,
                     info: _info,
-                    hasRating: hasRating,
+                    ratingAverage: _ratingAverage,
+                    ratingCount: _ratingCount,
                     area: area,
+                  ),
+                  const SizedBox(height: 12),
+                  _StationRatingCard(
+                    stationId: station.id,
+                    onRatingSaved: (summary) {
+                      if (!mounted || summary == null) return;
+                      setState(() {
+                        _ratingAverage = summary.average;
+                        _ratingCount = summary.count;
+                      });
+                    },
                   ),
                   const SizedBox(height: 18),
                   _StationContactCard(
@@ -922,6 +949,7 @@ class _StationStorefrontState extends State<_StationStorefront> {
 
   void _showCartNotice({required String waterType, required int quantity}) {
     _showTopNotice(
+      onTap: _openQrCheckout,
       child: Row(
         children: [
           Container(
@@ -958,6 +986,15 @@ class _StationStorefrontState extends State<_StationStorefront> {
                     color: Color(0xFFD9E9F9),
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                const Text(
+                  'Tap to continue to QR checkout',
+                  style: TextStyle(
+                    color: Color(0xFFB9D5F0),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ],
@@ -1007,7 +1044,89 @@ class _StationStorefrontState extends State<_StationStorefront> {
     );
   }
 
-  void _showTopNotice({required Widget child}) {
+  void _showAddToCartError(String message) {
+    _showTopNotice(
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(.14),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(
+              Icons.error_outline_rounded,
+              color: Colors.white,
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Could not add to cart',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  message,
+                  style: const TextStyle(
+                    color: Color(0xFFD9E9F9),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openQrCheckout() async {
+    _noticeTimer?.cancel();
+    _noticeRemoveTimer?.cancel();
+    _noticeEntry?.remove();
+    _noticeEntry = null;
+
+    try {
+      final cart = await SupabaseService.getActiveCart();
+      if (!mounted) return;
+      if (cart == null || cart.items.isEmpty) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Your cart is empty.')));
+        return;
+      }
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) =>
+              /*qr_checkout.*/ CartScreen(
+                buildMainWrapper: widget.buildMainWrapper,
+              ),
+        ),
+      );
+      widget.onCartChanged?.call();
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('Could not open QR checkout: $error')),
+        );
+    }
+  }
+
+  void _showTopNotice({required Widget child, VoidCallback? onTap}) {
     _noticeTimer?.cancel();
     _noticeRemoveTimer?.cancel();
     _noticeEntry?.remove();
@@ -1026,33 +1145,37 @@ class _StationStorefrontState extends State<_StationStorefront> {
           right: 16,
           child: SafeArea(
             bottom: false,
-            child: IgnorePointer(
-              child: AnimatedSlide(
-                offset: isVisible ? Offset.zero : const Offset(0, -1.5),
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOutCubic,
-                child: AnimatedOpacity(
-                  opacity: isVisible ? 1 : 0,
-                  duration: const Duration(milliseconds: 250),
-                  child: Material(
-                    color: Colors.transparent,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 14,
+            child: AnimatedSlide(
+              offset: isVisible ? Offset.zero : const Offset(0, -1.5),
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutCubic,
+              child: AnimatedOpacity(
+                opacity: isVisible ? 1 : 0,
+                duration: const Duration(milliseconds: 250),
+                child: Material(
+                  color: Colors.transparent,
+                  child: Ink(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF123A63),
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(.16),
+                          blurRadius: 20,
+                          offset: const Offset(0, 8),
+                        ),
+                      ],
+                    ),
+                    child: InkWell(
+                      onTap: onTap,
+                      borderRadius: BorderRadius.circular(16),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 14,
+                        ),
+                        child: child,
                       ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF123A63),
-                        borderRadius: BorderRadius.circular(16),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(.16),
-                            blurRadius: 20,
-                            offset: const Offset(0, 8),
-                          ),
-                        ],
-                      ),
-                      child: child,
                     ),
                   ),
                 ),
@@ -1098,6 +1221,7 @@ class _StationStorefrontState extends State<_StationStorefront> {
         containerOption: option,
         onCartChanged: widget.onCartChanged,
         onStationClosed: _showClosedStationNotice,
+        onAddError: _showAddToCartError,
         onItemAdded: (waterType, quantity) =>
             _showCartNotice(waterType: waterType, quantity: quantity),
       ),
@@ -1105,17 +1229,228 @@ class _StationStorefrontState extends State<_StationStorefront> {
   }
 }
 
+class _StationRatingCard extends StatefulWidget {
+  const _StationRatingCard({
+    required this.stationId,
+    required this.onRatingSaved,
+  });
+
+  final String stationId;
+  final ValueChanged<({double? average, int count})?> onRatingSaved;
+
+  @override
+  State<_StationRatingCard> createState() => _StationRatingCardState();
+}
+
+class _StationRatingCardState extends State<_StationRatingCard> {
+  ({String orderId, int? rating})? _target;
+  int? _selectedRating;
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTarget();
+  }
+
+  Future<void> _loadTarget() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final target = await SupabaseService.getStationRatingTarget(
+        widget.stationId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _target = target;
+        _selectedRating = target?.rating;
+        _loading = false;
+      });
+    } on Exception catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = error.toString();
+      });
+    }
+  }
+
+  Future<void> _submitRating() async {
+    final target = _target;
+    final rating = _selectedRating;
+    if (target == null || rating == null || _saving) return;
+
+    setState(() => _saving = true);
+    try {
+      await SupabaseService.saveStationRating(
+        orderId: target.orderId,
+        stationId: widget.stationId,
+        rating: rating,
+      );
+      if (!mounted) return;
+      setState(() {
+        _target = (orderId: target.orderId, rating: rating);
+        _saving = false;
+      });
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Your station rating was saved.')),
+        );
+      try {
+        final summary = await SupabaseService.getPublicStationRatingSummary(
+          widget.stationId,
+        );
+        if (mounted) widget.onRatingSaved(summary);
+      } on Exception catch (error) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                'Your rating was saved, but the station total could not refresh: $error',
+              ),
+            ),
+          );
+      }
+    } on Exception catch (error) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('Could not save your rating: $error')),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => _SurfaceCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Rate this station',
+          style: TextStyle(
+            color: _stationInk,
+            fontSize: 15,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 5),
+        if (_loading)
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.all(8),
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          )
+        else if (_error != null)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Your rating option could not be loaded: $_error',
+                style: const TextStyle(
+                  color: _danger,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+              ),
+              TextButton(
+                onPressed: _loadTarget,
+                child: const Text('Try again'),
+              ),
+            ],
+          )
+        else if (_target == null)
+          const Text(
+            'Complete a delivery from this station to rate it.',
+            style: TextStyle(color: textGray, fontSize: 12, height: 1.4),
+          )
+        else ...[
+          Text(
+            _target!.rating == null
+                ? 'How was your latest delivery?'
+                : 'Your rating for your latest delivery',
+            style: const TextStyle(color: textGray, fontSize: 12),
+          ),
+          const SizedBox(height: 5),
+          Row(
+            children: [
+              for (var value = 1; value <= 5; value++)
+                IconButton(
+                  tooltip: '$value ${value == 1 ? 'star' : 'stars'}',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: _saving
+                      ? null
+                      : () => setState(() => _selectedRating = value),
+                  icon: Icon(
+                    value <= (_selectedRating ?? 0)
+                        ? Icons.star_rounded
+                        : Icons.star_outline_rounded,
+                    color: warning,
+                    size: 29,
+                  ),
+                ),
+              if (_selectedRating != null)
+                Text(
+                  '$_selectedRating/5',
+                  style: const TextStyle(
+                    color: _stationInk,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          FilledButton(
+            onPressed: _selectedRating == null || _saving
+                ? null
+                : _submitRating,
+            style: FilledButton.styleFrom(backgroundColor: primaryBlue),
+            child: _saving
+                ? const SizedBox(
+                    width: 17,
+                    height: 17,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : Text(
+                    _target!.rating == null ? 'Submit rating' : 'Update rating',
+                  ),
+          ),
+        ],
+      ],
+    ),
+  );
+}
+
 class _StorefrontSummary extends StatelessWidget {
   const _StorefrontSummary({
     required this.station,
     required this.info,
-    required this.hasRating,
+    required this.ratingAverage,
+    required this.ratingCount,
     required this.area,
   });
 
   final NearbyStation station;
   final StationDeliveryInfo? info;
-  final bool hasRating;
+  final double? ratingAverage;
+  final int ratingCount;
   final String area;
 
   @override
@@ -1126,6 +1461,7 @@ class _StorefrontSummary extends StatelessWidget {
     final hours = info?.hoursLabel(DateTime.now(), isOpen: station.isOpen);
     final hasDeliveryInfo =
         fee != null || minimum != null || radius != null || hours != null;
+    final hasRating = ratingCount > 0 && ratingAverage != null;
 
     return _SurfaceCard(
       child: Column(
@@ -1145,7 +1481,7 @@ class _StorefrontSummary extends StatelessWidget {
                   ),
                 ),
               ),
-              if (station.ratingCount == 0)
+              if (ratingCount == 0)
                 const _NewStationPill()
               else if (hasRating)
                 Row(
@@ -1153,7 +1489,7 @@ class _StorefrontSummary extends StatelessWidget {
                     const Icon(Icons.star_rounded, color: warning, size: 17),
                     const SizedBox(width: 3),
                     Text(
-                      '${station.ratingAverage!.toStringAsFixed(1)} (${station.ratingCount})',
+                      '${ratingAverage!.toStringAsFixed(1)} ($ratingCount)',
                       style: const TextStyle(
                         color: _stationInk,
                         fontSize: 12,
@@ -1551,14 +1887,14 @@ class _PriceButton extends StatelessWidget {
       child: OutlinedButton(
         onPressed: onTap,
         style: OutlinedButton.styleFrom(
-          minimumSize: const Size(0, 62),
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          minimumSize: const Size(0, 72),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
           alignment: Alignment.centerLeft,
           side: BorderSide(
-            color: enabled ? const Color(0xFFD6E4F5) : borderColor,
+            color: enabled ? const Color(0xFF8FA8C3) : borderColor,
           ),
           backgroundColor: enabled
-              ? const Color(0xFFF8FBFF)
+              ? const Color(0xFFEAF0F7)
               : const Color(0xFFF5F7FA),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(13),
@@ -1579,9 +1915,9 @@ class _PriceButton extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      color: textGray,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
+                      color: _stationInk,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                   const SizedBox(height: 3),
@@ -1591,8 +1927,8 @@ class _PriceButton extends StatelessWidget {
                     child: Text(
                       '₱${price.toStringAsFixed(0)}',
                       style: const TextStyle(
-                        color: primaryBlue,
-                        fontSize: 17,
+                        color: Color(0xFF102A43),
+                        fontSize: 21,
                         height: 1.1,
                         fontWeight: FontWeight.w900,
                         letterSpacing: -.4,
@@ -1606,7 +1942,7 @@ class _PriceButton extends StatelessWidget {
             Icon(
               Icons.chevron_right_rounded,
               size: 17,
-              color: enabled ? primaryBlue : textGray,
+              color: enabled ? _stationInk : textGray,
             ),
           ],
         ),
@@ -1667,6 +2003,7 @@ class _ProductQuickView extends StatefulWidget {
     required this.info,
     required this.containerOption,
     required this.onStationClosed,
+    required this.onAddError,
     this.onCartChanged,
     this.onItemAdded,
   });
@@ -1676,6 +2013,7 @@ class _ProductQuickView extends StatefulWidget {
   final StationDeliveryInfo? info;
   final String containerOption;
   final VoidCallback onStationClosed;
+  final ValueChanged<String> onAddError;
   final VoidCallback? onCartChanged;
   final void Function(String waterType, int quantity)? onItemAdded;
 
@@ -1825,7 +2163,7 @@ class _ProductQuickViewState extends State<_ProductQuickView> {
                                 ? _danger
                                 : textGray;
                           }(),
-                          fontSize: 12,
+                          fontSize: 13,
                         ),
                       ),
                     ],
@@ -1869,7 +2207,7 @@ class _ProductQuickViewState extends State<_ProductQuickView> {
                   'this station’s ₱${minimum.toStringAsFixed(0)} minimum order.',
                   style: const TextStyle(
                     color: warning,
-                    fontSize: 12,
+                    fontSize: 13,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -1957,9 +2295,12 @@ class _ProductQuickViewState extends State<_ProductQuickView> {
       onItemAdded?.call(waterType, quantity);
     } on Exception catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not add this item: $error')),
-      );
+      final details = error.toString();
+      final message =
+          details.contains('Your cart already has items from another station')
+          ? 'Your cart has items from another station. Clear it before shopping here.'
+          : 'Could not add this item: ${details.replaceFirst(RegExp(r'^Exception: ?'), '')}';
+      widget.onAddError(message);
     } finally {
       if (mounted) setState(() => _adding = false);
     }
@@ -2057,7 +2398,7 @@ class _PriceBreakdown extends StatelessWidget {
               label,
               style: TextStyle(
                 color: bold ? _stationInk : textGray,
-                fontSize: 12,
+                fontSize: bold ? 14 : 13,
                 fontWeight: bold ? FontWeight.w900 : FontWeight.w600,
               ),
             ),
@@ -2065,8 +2406,8 @@ class _PriceBreakdown extends StatelessWidget {
           Text(
             '₱${value.toStringAsFixed(2)}',
             style: TextStyle(
-              color: bold ? primaryBlue : _stationInk,
-              fontSize: bold ? 13 : 12,
+              color: _stationInk,
+              fontSize: bold ? 17 : 13,
               fontWeight: bold ? FontWeight.w900 : FontWeight.w700,
             ),
           ),
@@ -2075,10 +2416,11 @@ class _PriceBreakdown extends StatelessWidget {
     );
 
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: _stationCanvas,
+        color: const Color(0xFFEAF0F7),
         borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFB8C7D8)),
       ),
       child: Column(
         children: [
@@ -2116,13 +2458,14 @@ class _RefillNotice extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFFEAF2FF),
+        color: const Color(0xFFEAF0F7),
         borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFB8C7D8)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.info_outline_rounded, color: primaryBlue, size: 18),
+          const Icon(Icons.info_outline_rounded, color: _stationInk, size: 20),
           const SizedBox(width: 9),
           Expanded(
             child: Column(
@@ -2131,8 +2474,8 @@ class _RefillNotice extends StatelessWidget {
                 Text(
                   'Refill: ₱${product.refillPrice.toStringAsFixed(2)} per gallon',
                   style: const TextStyle(
-                    color: primaryBlue,
-                    fontSize: 13,
+                    color: _stationInk,
+                    fontSize: 15,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -2140,8 +2483,8 @@ class _RefillNotice extends StatelessWidget {
                 Text(
                   text,
                   style: const TextStyle(
-                    color: primaryBlue,
-                    fontSize: 12,
+                    color: _stationInk,
+                    fontSize: 13,
                     height: 1.4,
                     fontWeight: FontWeight.w600,
                   ),
@@ -2319,7 +2662,7 @@ class _DirectoryStationCard extends StatelessWidget {
                     if (hasRating) ...[
                       const SizedBox(height: 3),
                       Text(
-                        '${station.ratingCount} ${station.ratingCount == 1 ? 'review' : 'reviews'}',
+                        '${station.ratingCount} ${station.ratingCount == 1 ? 'rating' : 'ratings'}',
                         style: const TextStyle(
                           color: textGray,
                           fontSize: 11,

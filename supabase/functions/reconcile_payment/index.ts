@@ -41,10 +41,13 @@ Deno.serve(async (request) => {
       return jsonResponse({ payment_id: payment.id, status: payment.status, unchanged: true });
     }
 
-    const session = await paymongoRequest(
-      `/checkout_sessions/${encodeURIComponent(payment.provider_checkout_id)}`,
+    const isPaymentIntent = payment.provider_checkout_id.startsWith("pi_");
+    const providerResponse = await paymongoRequest(
+      isPaymentIntent
+        ? `/payment_intents/${encodeURIComponent(payment.provider_checkout_id)}`
+        : `/checkout_sessions/${encodeURIComponent(payment.provider_checkout_id)}`,
     );
-    const data = session.data as {
+    const data = providerResponse.data as {
       id?: string;
       attributes?: {
         status?: string;
@@ -52,9 +55,12 @@ Deno.serve(async (request) => {
       };
     } | undefined;
     let providerPayment = _firstPayment(data?.attributes?.payments);
-    let providerStatus = providerPayment?.attributes?.status;
-    if (data?.attributes?.status === "paid" && providerStatus !== "paid" &&
-        providerStatus !== "succeeded" && providerPayment?.id) {
+    let providerStatus = isPaymentIntent
+      ? data?.attributes?.status
+      : providerPayment?.attributes?.status;
+    if (!isPaymentIntent && data?.attributes?.status === "paid" &&
+        providerStatus !== "paid" && providerStatus !== "succeeded" &&
+        providerPayment?.id) {
       const paymentResponse = await paymongoRequest(
         `/payments/${encodeURIComponent(providerPayment.id)}`,
       );
@@ -72,9 +78,10 @@ Deno.serve(async (request) => {
     }
     let status: string | null = null;
     if (providerStatus === "paid" || providerStatus === "succeeded" ||
-        data?.attributes?.status === "paid") status = "paid";
+        (!isPaymentIntent && data?.attributes?.status === "paid")) status = "paid";
     else if (providerStatus === "failed") status = "failed";
-    else if (data?.attributes?.status === "expired") status = "cancelled";
+    else if (!isPaymentIntent && data?.attributes?.status === "expired") status = "cancelled";
+    else if (isPaymentIntent && providerStatus === "cancelled") status = "cancelled";
     if (!status) {
       return jsonResponse({
         payment_id: payment.id,
@@ -96,7 +103,7 @@ Deno.serve(async (request) => {
       p_provider_event_id: `reconcile:${payment.provider_checkout_id}:${status}`,
       p_payment_id: payment.id,
       p_event_type: `reconciliation.${status}`,
-      p_payload: session,
+      p_payload: providerResponse,
       p_signature_valid: true,
       p_payment_status: status,
       p_amount: typeof capturedAmount === "number"

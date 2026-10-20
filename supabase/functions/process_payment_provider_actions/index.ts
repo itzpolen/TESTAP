@@ -48,17 +48,32 @@ Deno.serve(async (request) => {
           .single();
         if (paymentError) throw paymentError;
         if (!["paid", "partially_refunded", "refunded"].includes(payment.status)) {
-          const sessionResponse = await paymongoRequest(
-            `/checkout_sessions/${encodeURIComponent(checkoutId)}`,
-          );
-          const session = sessionResponse.data as {
-            attributes?: { status?: string };
-          } | undefined;
-          if (session?.attributes?.status !== "expired") {
-            await paymongoRequest(
-              `/checkout_sessions/${encodeURIComponent(checkoutId)}/expire`,
-              { method: "POST", body: { data: { attributes: {} } }, idempotencyKey: action.idempotency_key },
+          if (checkoutId.startsWith("pi_")) {
+            const intentResponse = await paymongoRequest(
+              `/payment_intents/${encodeURIComponent(checkoutId)}`,
             );
+            const intent = intentResponse.data as {
+              attributes?: { status?: string };
+            } | undefined;
+            if (!["succeeded", "cancelled"].includes(intent?.attributes?.status ?? "")) {
+              await paymongoRequest(
+                `/payment_intents/${encodeURIComponent(checkoutId)}/cancel`,
+                { method: "POST", idempotencyKey: action.idempotency_key },
+              );
+            }
+          } else {
+            const sessionResponse = await paymongoRequest(
+              `/checkout_sessions/${encodeURIComponent(checkoutId)}`,
+            );
+            const session = sessionResponse.data as {
+              attributes?: { status?: string };
+            } | undefined;
+            if (session?.attributes?.status !== "expired") {
+              await paymongoRequest(
+                `/checkout_sessions/${encodeURIComponent(checkoutId)}/expire`,
+                { method: "POST", body: { data: { attributes: {} } }, idempotencyKey: action.idempotency_key },
+              );
+            }
           }
         }
       } else if (action.action_type === "refund") {

@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:flutter/cupertino.dart' show CupertinoPageRoute;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -16,6 +16,7 @@ import '../widgets/custom_button.dart';
 import 'cart_checkout_screen.dart';
 import 'location_flow_screen.dart';
 import 'station_screen.dart';
+//import 'cart_checkout_screen_qr.dart' as qr_checkout;
 
 // ============================================================
 // DESIGN TOKENS
@@ -28,17 +29,32 @@ const _navy = Color(0xFF0A2A5C);
 const _aqua = Color(0xFF1FB5C9);
 const _mint = Color(0xFF16A37F);
 const _hairline = Color(0xFFE6EEF7);
+const _skeleton = Color(0xFFE6EEF7);
 
 const _pagePadding = 20.0;
 const _cardRadius = 22.0;
 
+/// On tablets and landscape the content stays this wide and centred, so
+/// cards never stretch across the whole screen.
+const _maxContentWidth = 680.0;
+
 /// Short, quiet motion in the style of iOS: ease-out curves, no loops.
 /// Everything respects the system "remove animations" setting.
 const _fast = Duration(milliseconds: 200);
-const _medium = Duration(milliseconds: 320);
+const _medium = Duration(milliseconds: 280);
 
 bool _reduceMotion(BuildContext context) =>
     MediaQuery.disableAnimationsOf(context);
+
+/// Side gutter for a given screen width: 20 on phones, growing on wide
+/// screens so the content column stays centred.
+double _gutterFor(double width) =>
+    math.max(_pagePadding, (width - _maxContentWidth) / 2);
+
+/// Cached text styles. `GoogleFonts.manrope` is comparatively expensive, so
+/// each distinct style is created once and reused on every rebuild.
+final _styleCache =
+    <(double, FontWeight, Color, double?, double?), TextStyle>{};
 
 TextStyle _t(
   double size, {
@@ -46,12 +62,15 @@ TextStyle _t(
   Color c = textDark,
   double? h,
   double? ls,
-}) => GoogleFonts.manrope(
-  fontSize: size,
-  fontWeight: w,
-  color: c,
-  height: h,
-  letterSpacing: ls,
+}) => _styleCache.putIfAbsent(
+  (size, w, c, h, ls),
+  () => GoogleFonts.manrope(
+    fontSize: size,
+    fontWeight: w,
+    color: c,
+    height: h,
+    letterSpacing: ls,
+  ),
 );
 
 enum _StationSort { nearest, topRated, lowestPrice }
@@ -111,24 +130,32 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  /// Scroll distance after which the compact top bar takes over.
-  static const _compactFrom = 96.0;
+  /// Scroll distance after which the compact top bar appears.
+  static const _compactFrom = 150.0;
 
   final _searchController = TextEditingController();
   final _searchFocus = FocusNode();
   final _scrollController = ScrollController();
-  final _scrollOffset = ValueNotifier<double>(0);
   final _stationsKey = GlobalKey();
 
-  /// Stations that already played their entrance animation, so scrolling
-  /// back up does not replay it.
+  /// Flips once when the header scrolls away. Only the status bar style and
+  /// the compact bar listen to it, so scrolling never rebuilds the page.
+  final _compact = ValueNotifier<bool>(false);
+
+  /// Stations that already played their entrance animation.
   final _revealed = <String>{};
+
+  Timer? _searchDebounce;
+  String _query = '';
 
   late DeliveryLocation? _browsingLocation = widget.initialBrowsingLocation;
   List<NearbyStation> _stations = const [];
+
+  /// Filtered and sorted result, recomputed only when an input changes.
+  List<NearbyStation> _visible = const [];
+
   bool _loadingStations = false;
   bool _openNowOnly = false;
-  bool _compactBar = false;
   _StationSort _sort = _StationSort.nearest;
   String? _loadError;
   double _searchRadiusKm = NearbyConfig.defaultRadiusKm;
@@ -159,28 +186,60 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _requestNumber++;
+    _searchDebounce?.cancel();
     _searchController
       ..removeListener(_searchChanged)
       ..dispose();
     _scrollController
       ..removeListener(_onScroll)
       ..dispose();
-    _scrollOffset.dispose();
+    _compact.dispose();
     _searchFocus.dispose();
     super.dispose();
   }
 
+  /// Typing is debounced: the list is filtered once the customer pauses,
+  /// instead of rebuilding the whole page on every keystroke.
   void _searchChanged() {
-    if (mounted) setState(() {});
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 240), () {
+      if (!mounted) return;
+      final query = _searchController.text.trim().toLowerCase();
+      if (query == _query) return;
+      setState(() {
+        _query = query;
+        _recompute();
+      });
+    });
   }
 
   void _onScroll() {
-    final offset = _scrollController.hasClients
-        ? _scrollController.offset
-        : 0.0;
-    _scrollOffset.value = offset;
-    final compact = offset > _compactFrom + 24;
-    if (compact != _compactBar) setState(() => _compactBar = compact);
+    if (!_scrollController.hasClients) return;
+    final compact = _scrollController.offset > _compactFrom;
+    if (compact != _compact.value) _compact.value = compact;
+  }
+
+  /// Filters and sorts once per change, not once per build.
+  void _recompute() {
+    final list = _stations.where((station) {
+      if (_openNowOnly && !station.isOpen) return false;
+      if (_query.isEmpty) return true;
+      return station.name.toLowerCase().contains(_query) ||
+          (station.barangay?.toLowerCase().contains(_query) ?? false) ||
+          (station.city?.toLowerCase().contains(_query) ?? false) ||
+          (station.province?.toLowerCase().contains(_query) ?? false);
+    }).toList();
+    switch (_sort) {
+      case _StationSort.nearest:
+        list.sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+      case _StationSort.topRated:
+        list.sort(
+          (a, b) => (b.ratingAverage ?? 0).compareTo(a.ratingAverage ?? 0),
+        );
+      case _StationSort.lowestPrice:
+        list.sort((a, b) => a.startingPrice.compareTo(b.startingPrice));
+    }
+    _visible = list;
   }
 
   // ---------------------------------------------------------- location
@@ -232,6 +291,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
       setState(() {
         _stations = const [];
+        _visible = const [];
         _loadingStations = false;
         _loadError = null;
         if (radiusKm != null) _searchRadiusKm = radiusKm;
@@ -255,6 +315,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted || request != _requestNumber) return;
       setState(() {
         _stations = stations;
+        _recompute();
         _loadingStations = false;
       });
     } on Exception catch (exception) {
@@ -312,15 +373,21 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _openCart() async {
     await Navigator.of(context).push(
       CupertinoPageRoute(
-        builder: (_) => CartScreen(buildMainWrapper: widget.buildMainWrapper),
+        builder: (_) => /*qr_checkout.*/
+            CartScreen(buildMainWrapper: widget.buildMainWrapper),
       ),
     );
     if (mounted) widget.onCartChanged?.call();
   }
 
   void _clearFilters() {
+    _searchDebounce?.cancel();
     _searchController.clear();
-    setState(() => _openNowOnly = false);
+    setState(() {
+      _query = '';
+      _openNowOnly = false;
+      _recompute();
+    });
   }
 
   void _scrollToStations() {
@@ -345,16 +412,18 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) _searchFocus.requestFocus();
   }
 
-  void _showStationDetails(NearbyStation station) {
-    Navigator.of(context).push<void>(
+  Future<void> _showStationDetails(NearbyStation station) async {
+    await Navigator.of(context).push<void>(
       CupertinoPageRoute(
         builder: (_) => StationScreen(
           station: station,
           initialBrowsingLocation: _browsingLocation,
           onCartChanged: widget.onCartChanged,
+          buildMainWrapper: widget.buildMainWrapper,
         ),
       ),
     );
+    if (mounted) await _loadNearbyStations();
   }
 
   // ---------------------------------------------------------- derived
@@ -373,184 +442,178 @@ class _HomeScreenState extends State<HomeScreen> {
     return 'Pinned map location';
   }
 
-  List<NearbyStation> get _visibleStations {
-    final query = _searchController.text.trim().toLowerCase();
-    final list = _stations.where((station) {
-      if (_openNowOnly && !station.isOpen) return false;
-      if (query.isEmpty) return true;
-      return station.name.toLowerCase().contains(query) ||
-          (station.barangay?.toLowerCase().contains(query) ?? false) ||
-          (station.city?.toLowerCase().contains(query) ?? false) ||
-          (station.province?.toLowerCase().contains(query) ?? false);
-    }).toList();
-    switch (_sort) {
-      case _StationSort.nearest:
-        list.sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
-      case _StationSort.topRated:
-        list.sort(
-          (a, b) => (b.ratingAverage ?? 0).compareTo(a.ratingAverage ?? 0),
-        );
-      case _StationSort.lowestPrice:
-        list.sort((a, b) => a.startingPrice.compareTo(b.startingPrice));
-    }
-    return list;
-  }
-
   // ---------------------------------------------------------- build
 
   @override
   Widget build(BuildContext context) {
-    final stations = _visibleStations;
-    final searching = _searchController.text.trim().isNotEmpty;
+    // Aspect-specific lookups only: the keyboard opening must not rebuild
+    // the whole page.
+    final width = MediaQuery.sizeOf(context).width;
+    final gutter = _gutterFor(width);
+    final topInset = MediaQuery.paddingOf(context).top;
+
+    final stations = _visible;
+    final searching = _query.isNotEmpty;
     final showList =
         _hasCoordinates &&
         !_loadingStations &&
         _loadError == null &&
         stations.isNotEmpty;
-    final topInset = MediaQuery.paddingOf(context).top;
+    final listPadding = EdgeInsets.fromLTRB(gutter, 4, gutter, 28);
 
-    return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: _compactBar
-          ? SystemUiOverlayStyle.dark
-          : SystemUiOverlayStyle.light,
-      child: Scaffold(
-        backgroundColor: _pageBackground,
-        body: Stack(
-          children: [
-            RefreshIndicator(
-              color: primaryBlue,
-              edgeOffset: topInset + 70,
-              onRefresh: () => _loadNearbyStations(),
-              child: CustomScrollView(
-                controller: _scrollController,
-                physics: const BouncingScrollPhysics(
-                  parent: AlwaysScrollableScrollPhysics(),
-                ),
-                slivers: [
-                  SliverToBoxAdapter(
+    final page = Scaffold(
+      backgroundColor: _pageBackground,
+      // The list does not resize with the keyboard; a spacer at the end of
+      // the list makes room instead, so opening the keyboard stays smooth.
+      resizeToAvoidBottomInset: false,
+      body: Stack(
+        children: [
+          RefreshIndicator(
+            color: primaryBlue,
+            edgeOffset: topInset + 70,
+            onRefresh: () => _loadNearbyStations(),
+            child: CustomScrollView(
+              controller: _scrollController,
+              physics: const AlwaysScrollableScrollPhysics(),
+              cacheExtent: 600,
+              slivers: [
+                SliverToBoxAdapter(
+                  child: RepaintBoundary(
                     child: _HeaderWithPromo(
                       showPromo: !searching,
+                      gutter: gutter,
+                      promoHeight: width < 340 ? 176.0 : 156.0,
                       locationLabel: _locationLabel,
                       onChangeLocation: _showLocationOptions,
                       cartItemCount: widget.cartItemCount,
                       onCart: _openCart,
                       searchController: _searchController,
                       searchFocus: _searchFocus,
-                      scrollOffset: _scrollOffset,
                       onPromoTap: _scrollToStations,
                     ),
                   ),
-                  if (widget.activeOrderLabel != null)
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(
-                          _pagePadding,
-                          4,
-                          _pagePadding,
-                          0,
-                        ),
-                        child: _ActiveOrderBanner(
-                          label: widget.activeOrderLabel!,
-                          onTap: widget.onTrackOrder,
-                        ),
+                ),
+                if (widget.activeOrderLabel != null)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(gutter, 4, gutter, 0),
+                      child: _ActiveOrderBanner(
+                        label: widget.activeOrderLabel!,
+                        onTap: widget.onTrackOrder,
                       ),
                     ),
-                  SliverToBoxAdapter(
-                    child: _SectionHeader(
-                      key: _stationsKey,
-                      title: 'Nearby stations',
-                      trailing: showList
-                          ? '${stations.length} found · ${_searchRadiusKm.round()} km'
-                          : null,
-                    ),
                   ),
-                  SliverToBoxAdapter(
-                    child: _FilterRow(
-                      sort: _sort,
-                      openNowOnly: _openNowOnly,
-                      onSort: (value) {
-                        HapticFeedback.selectionClick();
-                        setState(() => _sort = value);
-                      },
-                      onToggleOpen: () {
-                        HapticFeedback.selectionClick();
-                        setState(() => _openNowOnly = !_openNowOnly);
-                      },
-                    ),
+                SliverToBoxAdapter(
+                  child: _SectionHeader(
+                    key: _stationsKey,
+                    gutter: gutter,
+                    title: 'Nearby stations',
+                    trailing: showList
+                        ? '${stations.length} found · ${_searchRadiusKm.round()} km'
+                        : null,
                   ),
-                  if (showList)
-                    SliverPadding(
-                      padding: const EdgeInsets.fromLTRB(
-                        _pagePadding,
-                        4,
-                        _pagePadding,
-                        28,
-                      ),
-                      sliver: SliverList.separated(
-                        itemCount: stations.length,
-                        separatorBuilder: (_, _) => const SizedBox(height: 16),
-                        itemBuilder: (context, index) {
-                          final station = stations[index];
-                          final key = '${station.name}#${station.distanceKm}';
+                ),
+                SliverToBoxAdapter(
+                  child: _FilterRow(
+                    gutter: gutter,
+                    sort: _sort,
+                    openNowOnly: _openNowOnly,
+                    onSort: (value) {
+                      HapticFeedback.selectionClick();
+                      setState(() {
+                        _sort = value;
+                        _recompute();
+                      });
+                    },
+                    onToggleOpen: () {
+                      HapticFeedback.selectionClick();
+                      setState(() {
+                        _openNowOnly = !_openNowOnly;
+                        _recompute();
+                      });
+                    },
+                  ),
+                ),
+                if (showList)
+                  SliverPadding(
+                    padding: listPadding,
+                    sliver: SliverList.separated(
+                      itemCount: stations.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 16),
+                      itemBuilder: (context, index) {
+                        final station = stations[index];
+                        final key = '${station.name}#${station.distanceKm}';
+                        final card = _StationCard(
+                          key: ValueKey(key),
+                          station: station,
+                          onTap: () => _showStationDetails(station),
+                        );
+                        // Only the first few cards animate in, once. Cards
+                        // that scroll into view later appear instantly, which
+                        // keeps scrolling smooth.
+                        if (index < 4 && _revealed.add(key)) {
                           return _Reveal(
-                            key: ValueKey(key),
-                            play: _revealed.add(key),
-                            delay: Duration(
-                              milliseconds: 60 * math.min(index, 4),
-                            ),
-                            child: _StationCard(
-                              station: station,
-                              onTap: () => _showStationDetails(station),
-                            ),
+                            delay: Duration(milliseconds: 60 * index),
+                            child: card,
                           );
-                        },
-                      ),
-                    )
-                  else if (_hasCoordinates && _loadingStations)
-                    SliverPadding(
-                      padding: const EdgeInsets.fromLTRB(
-                        _pagePadding,
-                        4,
-                        _pagePadding,
-                        28,
-                      ),
-                      sliver: SliverList.separated(
-                        itemCount: 3,
-                        separatorBuilder: (_, _) => const SizedBox(height: 16),
-                        itemBuilder: (_, _) => const _SkeletonCard(),
-                      ),
-                    )
-                  else
-                    SliverPadding(
-                      padding: const EdgeInsets.fromLTRB(
-                        _pagePadding,
-                        4,
-                        _pagePadding,
-                        28,
-                      ),
-                      sliver: SliverToBoxAdapter(child: _buildStateView()),
+                        }
+                        return card;
+                      },
                     ),
-                  if (showList && !searching)
-                    const SliverToBoxAdapter(child: _HomeFooter()),
-                ],
-              ),
+                  )
+                else if (_hasCoordinates && _loadingStations)
+                  SliverPadding(
+                    padding: listPadding,
+                    sliver: SliverList.separated(
+                      itemCount: 3,
+                      separatorBuilder: (_, _) => const SizedBox(height: 16),
+                      itemBuilder: (_, _) => const _SkeletonCard(),
+                    ),
+                  )
+                else
+                  SliverPadding(
+                    padding: listPadding,
+                    sliver: SliverToBoxAdapter(child: _buildStateView()),
+                  ),
+                if (showList && !searching)
+                  SliverToBoxAdapter(
+                    child: RepaintBoundary(child: _HomeFooter(gutter: gutter)),
+                  ),
+                const SliverToBoxAdapter(child: _KeyboardSpacer()),
+              ],
             ),
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: _CompactBar(
-                scrollOffset: _scrollOffset,
-                from: _compactFrom,
-                locationLabel: _locationLabel,
-                onLocation: _showLocationOptions,
-                onSearch: _focusSearch,
-                cartItemCount: widget.cartItemCount,
-                onCart: _openCart,
-              ),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: _CompactBar(
+              compact: _compact,
+              gutter: gutter,
+              locationLabel: _locationLabel,
+              onLocation: _showLocationOptions,
+              onSearch: _focusSearch,
+              cartItemCount: widget.cartItemCount,
+              onCart: _openCart,
             ),
-          ],
-        ),
+          ),
+        ],
+      ),
+    );
+
+    // Clamp very large system text so layouts never overflow.
+    return MediaQuery.withClampedTextScaling(
+      maxScaleFactor: 1.3,
+      child: ValueListenableBuilder<bool>(
+        valueListenable: _compact,
+        child: page,
+        builder: (context, compact, child) =>
+            AnnotatedRegion<SystemUiOverlayStyle>(
+              value: compact
+                  ? SystemUiOverlayStyle.dark
+                  : SystemUiOverlayStyle.light,
+              child: child!,
+            ),
       ),
     );
   }
@@ -568,6 +631,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 14),
             Text(
               'Could not load nearby stations',
+              textAlign: TextAlign.center,
               style: _t(15, w: FontWeight.w800),
             ),
             const SizedBox(height: 6),
@@ -637,22 +701,25 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+/// Reserves space for the keyboard at the end of the list. Only this tiny
+/// widget listens to the keyboard height.
+class _KeyboardSpacer extends StatelessWidget {
+  const _KeyboardSpacer();
+
+  @override
+  Widget build(BuildContext context) =>
+      SizedBox(height: MediaQuery.viewInsetsOf(context).bottom);
+}
+
 // ============================================================
 // MOTION PRIMITIVES
 // ============================================================
 
-/// Fades and lifts its child in once. Passing `play: false` shows the child
-/// immediately, which is how already-seen list items avoid replaying.
+/// Fades and lifts its child in once.
 class _Reveal extends StatefulWidget {
-  const _Reveal({
-    super.key,
-    required this.child,
-    this.play = true,
-    this.delay = Duration.zero,
-  });
+  const _Reveal({required this.child, this.delay = Duration.zero});
 
   final Widget child;
-  final bool play;
   final Duration delay;
 
   @override
@@ -660,7 +727,7 @@ class _Reveal extends StatefulWidget {
 }
 
 class _RevealState extends State<_Reveal> with SingleTickerProviderStateMixin {
-  static const _duration = Duration(milliseconds: 440);
+  static const _duration = Duration(milliseconds: 420);
 
   late final AnimationController _controller;
   late final CurvedAnimation _curve;
@@ -678,11 +745,7 @@ class _RevealState extends State<_Reveal> with SingleTickerProviderStateMixin {
         curve: Curves.easeOutCubic,
       ),
     );
-    if (widget.play) {
-      _controller.forward();
-    } else {
-      _controller.value = 1;
-    }
+    _controller.forward();
   }
 
   @override
@@ -716,92 +779,88 @@ class _RevealState extends State<_Reveal> with SingleTickerProviderStateMixin {
 // ============================================================
 
 /// Header with the promo banner overlapping its lower edge. While the
-/// customer is searching, the banner collapses away smoothly.
+/// customer is searching, the banner is removed.
 class _HeaderWithPromo extends StatelessWidget {
   const _HeaderWithPromo({
     required this.showPromo,
+    required this.gutter,
+    required this.promoHeight,
     required this.locationLabel,
     required this.onChangeLocation,
     required this.cartItemCount,
     required this.onCart,
     required this.searchController,
     required this.searchFocus,
-    required this.scrollOffset,
     required this.onPromoTap,
   });
 
-  static const _promoHeight = 156.0;
   static const _overlap = 46.0;
   static const _gap = 20.0;
 
   final bool showPromo;
+  final double gutter;
+  final double promoHeight;
   final String? locationLabel;
   final VoidCallback onChangeLocation;
   final int cartItemCount;
   final VoidCallback onCart;
   final TextEditingController searchController;
   final FocusNode searchFocus;
-  final ValueNotifier<double> scrollOffset;
   final VoidCallback onPromoTap;
 
   @override
   Widget build(BuildContext context) {
     final header = _HomeHeader(
+      gutter: gutter,
       locationLabel: locationLabel,
       onChangeLocation: onChangeLocation,
       cartItemCount: cartItemCount,
       onCart: onCart,
       searchController: searchController,
       searchFocus: searchFocus,
-      scrollOffset: scrollOffset,
       bottomPadding: showPromo ? _overlap + 22 : 24,
     );
-    return AnimatedSize(
-      duration: _medium,
-      curve: Curves.easeOutCubic,
-      alignment: Alignment.topCenter,
-      child: showPromo
-          ? Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Column(
-                  children: [
-                    header,
-                    const SizedBox(height: _promoHeight - _overlap + _gap),
-                  ],
-                ),
-                Positioned(
-                  left: _pagePadding,
-                  right: _pagePadding,
-                  bottom: _gap,
-                  child: _PromoBanner(height: _promoHeight, onTap: onPromoTap),
-                ),
-              ],
-            )
-          : header,
+    if (!showPromo) return header;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Column(
+          children: [
+            header,
+            SizedBox(height: promoHeight - _overlap + _gap),
+          ],
+        ),
+        Positioned(
+          left: gutter,
+          right: gutter,
+          bottom: _gap,
+          child: _PromoBanner(height: promoHeight, onTap: onPromoTap),
+        ),
+      ],
     );
   }
 }
 
+/// Static: nothing in the header reacts to scrolling.
 class _HomeHeader extends StatelessWidget {
   const _HomeHeader({
+    required this.gutter,
     required this.locationLabel,
     required this.onChangeLocation,
     required this.cartItemCount,
     required this.onCart,
     required this.searchController,
     required this.searchFocus,
-    required this.scrollOffset,
     required this.bottomPadding,
   });
 
+  final double gutter;
   final String? locationLabel;
   final VoidCallback onChangeLocation;
   final int cartItemCount;
   final VoidCallback onCart;
   final TextEditingController searchController;
   final FocusNode searchFocus;
-  final ValueNotifier<double> scrollOffset;
   final double bottomPadding;
 
   @override
@@ -841,9 +900,9 @@ class _HomeHeader extends StatelessWidget {
             ),
             Padding(
               padding: EdgeInsets.fromLTRB(
-                _pagePadding,
+                gutter,
                 top + 12,
-                _pagePadding,
+                gutter,
                 bottomPadding,
               ),
               child: Column(
@@ -865,41 +924,19 @@ class _HomeHeader extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 26),
-                  // Fades and drifts as the page scrolls, like an iOS large title.
-                  ValueListenableBuilder<double>(
-                    valueListenable: scrollOffset,
-                    builder: (context, offset, child) {
-                      final t = (1 - offset / 140).clamp(0.0, 1.0);
-                      return Opacity(
-                        opacity: t,
-                        child: Transform.translate(
-                          offset: Offset(0, math.min(offset, 140) * .16),
-                          child: child,
-                        ),
-                      );
-                    },
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _greeting(),
-                          style: _t(
-                            13.5,
-                            c: Colors.white.withValues(alpha: .78),
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Fresh water,\ndelivered to your door.',
-                          style: _t(
-                            27,
-                            w: FontWeight.w800,
-                            c: Colors.white,
-                            h: 1.14,
-                            ls: -.7,
-                          ),
-                        ),
-                      ],
+                  Text(
+                    _greeting(),
+                    style: _t(13.5, c: Colors.white.withValues(alpha: .78)),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Fresh water,\ndelivered to your door.',
+                    style: _t(
+                      27,
+                      w: FontWeight.w800,
+                      c: Colors.white,
+                      h: 1.14,
+                      ls: -.7,
                     ),
                   ),
                   const SizedBox(height: 20),
@@ -1037,35 +1074,40 @@ class _SearchField extends StatelessWidget {
       borderRadius: BorderRadius.circular(16),
       boxShadow: [
         BoxShadow(
-          color: _headerStart.withValues(alpha: .22),
-          blurRadius: 24,
-          offset: const Offset(0, 10),
+          color: _headerStart.withValues(alpha: .2),
+          blurRadius: 18,
+          offset: const Offset(0, 8),
         ),
       ],
     ),
-    child: TextField(
-      controller: controller,
-      focusNode: focusNode,
-      textInputAction: TextInputAction.search,
-      onTapOutside: (_) => focusNode.unfocus(),
-      style: _t(14.5),
-      decoration: InputDecoration(
-        hintText: 'Search stations or area',
-        hintStyle: _t(14.5, w: FontWeight.w500, c: textGray),
-        prefixIcon: const Icon(Icons.search_rounded, color: primaryBlue),
-        suffixIcon: controller.text.isEmpty
-            ? null
-            : IconButton(
-                tooltip: 'Clear search',
-                onPressed: controller.clear,
-                icon: const Icon(Icons.close_rounded, color: textGray),
-              ),
-        filled: true,
-        fillColor: Colors.white,
-        contentPadding: const EdgeInsets.symmetric(vertical: 16),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(16),
-          borderSide: BorderSide.none,
+    // Only the field listens to what is typed, so the clear button appears
+    // instantly without rebuilding the rest of the page.
+    child: ValueListenableBuilder<TextEditingValue>(
+      valueListenable: controller,
+      builder: (context, value, _) => TextField(
+        controller: controller,
+        focusNode: focusNode,
+        textInputAction: TextInputAction.search,
+        onTapOutside: (_) => focusNode.unfocus(),
+        style: _t(14.5),
+        decoration: InputDecoration(
+          hintText: 'Search stations or area',
+          hintStyle: _t(14.5, w: FontWeight.w500, c: textGray),
+          prefixIcon: const Icon(Icons.search_rounded, color: primaryBlue),
+          suffixIcon: value.text.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Clear search',
+                  onPressed: controller.clear,
+                  icon: const Icon(Icons.close_rounded, color: textGray),
+                ),
+          filled: true,
+          fillColor: Colors.white,
+          contentPadding: const EdgeInsets.symmetric(vertical: 16),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
         ),
       ),
     ),
@@ -1073,13 +1115,15 @@ class _SearchField extends StatelessWidget {
 }
 
 // ============================================================
-// COMPACT BAR (fades in once the header has scrolled away)
+// COMPACT BAR
+// Appears once when the header has scrolled away and leaves once when it
+// returns. No per-frame work and no blur, so scrolling stays smooth.
 // ============================================================
 
 class _CompactBar extends StatelessWidget {
   const _CompactBar({
-    required this.scrollOffset,
-    required this.from,
+    required this.compact,
+    required this.gutter,
     required this.locationLabel,
     required this.onLocation,
     required this.onSearch,
@@ -1087,8 +1131,8 @@ class _CompactBar extends StatelessWidget {
     required this.onCart,
   });
 
-  final ValueNotifier<double> scrollOffset;
-  final double from;
+  final ValueListenable<bool> compact;
+  final double gutter;
   final String? locationLabel;
   final VoidCallback onLocation;
   final VoidCallback onSearch;
@@ -1098,95 +1142,89 @@ class _CompactBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final top = MediaQuery.paddingOf(context).top;
-    return ValueListenableBuilder<double>(
-      valueListenable: scrollOffset,
-      builder: (context, offset, _) {
-        final t = ((offset - from) / 48).clamp(0.0, 1.0);
-        if (t == 0) return const SizedBox.shrink();
-        return IgnorePointer(
-          ignoring: t < .6,
-          child: Opacity(
-            opacity: t,
-            child: Transform.translate(
-              offset: Offset(0, (1 - t) * -12),
-              child: ClipRect(
-                child: BackdropFilter(
-                  filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                  child: Container(
-                    padding: EdgeInsets.fromLTRB(16, top + 8, 16, 10),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: .88),
-                      border: const Border(
-                        bottom: BorderSide(color: _hairline),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Material(
-                            color: _pageBackground,
-                            shape: const StadiumBorder(
-                              side: BorderSide(color: _hairline),
-                            ),
-                            child: InkWell(
-                              onTap: onLocation,
-                              customBorder: const StadiumBorder(),
-                              child: Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  12,
-                                  9,
-                                  10,
-                                  9,
+    return ValueListenableBuilder<bool>(
+      valueListenable: compact,
+      builder: (context, visible, _) => IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedSlide(
+          offset: visible ? Offset.zero : const Offset(0, -1),
+          duration: _medium,
+          curve: Curves.easeOutCubic,
+          child: AnimatedOpacity(
+            opacity: visible ? 1 : 0,
+            duration: _fast,
+            child: RepaintBoundary(
+              child: Container(
+                padding: EdgeInsets.fromLTRB(
+                  math.max(16, gutter - 4),
+                  top + 8,
+                  math.max(16, gutter - 4),
+                  10,
+                ),
+                decoration: const BoxDecoration(
+                  color: Color(0xF7FFFFFF),
+                  border: Border(bottom: BorderSide(color: _hairline)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Material(
+                        color: _pageBackground,
+                        shape: const StadiumBorder(
+                          side: BorderSide(color: _hairline),
+                        ),
+                        child: InkWell(
+                          onTap: onLocation,
+                          customBorder: const StadiumBorder(),
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 9, 10, 9),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.location_on_rounded,
+                                  size: 18,
+                                  color: primaryBlue,
                                 ),
-                                child: Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.location_on_rounded,
-                                      size: 18,
-                                      color: primaryBlue,
-                                    ),
-                                    const SizedBox(width: 7),
-                                    Expanded(
-                                      child: Text(
-                                        locationLabel ?? 'Set your location',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: _t(13, w: FontWeight.w700),
-                                      ),
-                                    ),
-                                    const Icon(
-                                      Icons.keyboard_arrow_down_rounded,
-                                      size: 20,
-                                      color: textGray,
-                                    ),
-                                  ],
+                                const SizedBox(width: 7),
+                                Expanded(
+                                  child: Text(
+                                    locationLabel ?? 'Set your location',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: _t(13, w: FontWeight.w700),
+                                  ),
                                 ),
-                              ),
+                                const Icon(
+                                  Icons.keyboard_arrow_down_rounded,
+                                  size: 20,
+                                  color: textGray,
+                                ),
+                              ],
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        _RoundIconButton(
-                          icon: Icons.search_rounded,
-                          label: 'Search stations',
-                          onTap: onSearch,
-                        ),
-                        const SizedBox(width: 8),
-                        _RoundIconButton(
-                          icon: Icons.shopping_bag_outlined,
-                          label: 'Cart',
-                          badge: cartItemCount,
-                          onTap: onCart,
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    _RoundIconButton(
+                      icon: Icons.search_rounded,
+                      label: 'Search stations',
+                      onTap: onSearch,
+                    ),
+                    const SizedBox(width: 8),
+                    _RoundIconButton(
+                      icon: Icons.shopping_bag_outlined,
+                      label: 'Cart',
+                      badge: cartItemCount,
+                      onTap: onCart,
+                    ),
+                  ],
                 ),
               ),
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }
@@ -1452,8 +1490,8 @@ class _ActiveOrderBanner extends StatelessWidget {
 
 // ============================================================
 // PROMO BANNER
-// One card that cross-fades in place, so nothing slides across the
-// screen. Swipe to change, tap to act. The thin bar shows the timing.
+// One card that cross-fades in place. No swipe gesture, no sliding and no
+// per-frame animation: it changes every few seconds and repaints only then.
 // ============================================================
 
 class _PromoData {
@@ -1508,194 +1546,98 @@ class _PromoBanner extends StatefulWidget {
   State<_PromoBanner> createState() => _PromoBannerState();
 }
 
-class _PromoBannerState extends State<_PromoBanner>
-    with SingleTickerProviderStateMixin {
-  static const _interval = Duration(seconds: 6);
-
-  late final AnimationController _progress = AnimationController(
-    vsync: this,
-    duration: _interval,
-  );
+class _PromoBannerState extends State<_PromoBanner> {
+  Timer? _timer;
   int _index = 0;
   bool _holding = false;
 
   @override
-  void initState() {
-    super.initState();
-    _progress.addStatusListener((status) {
-      if (status == AnimationStatus.completed) _go(1);
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _timer?.cancel();
+    if (_reduceMotion(context)) return;
+    _timer = Timer.periodic(const Duration(seconds: 6), (_) {
+      if (!mounted || _holding) return;
+      setState(() => _index = (_index + 1) % _promos.length);
     });
   }
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_reduceMotion(context)) {
-      _progress.stop();
-    } else if (!_holding && !_progress.isAnimating) {
-      _progress.forward();
-    }
-  }
-
-  @override
   void dispose() {
-    _progress.dispose();
+    _timer?.cancel();
     super.dispose();
-  }
-
-  void _go(int delta) {
-    if (!mounted) return;
-    setState(() => _index = (_index + delta + _promos.length) % _promos.length);
-    _progress.reset();
-    if (!_holding && !_reduceMotion(context)) _progress.forward();
-  }
-
-  void _hold() {
-    _holding = true;
-    _progress.stop();
-  }
-
-  void _release() {
-    _holding = false;
-    if (!_reduceMotion(context)) _progress.forward();
   }
 
   @override
   Widget build(BuildContext context) {
-    final media = MediaQuery.of(context);
     final reduceMotion = _reduceMotion(context);
-    return MediaQuery(
-      data: media.copyWith(
-        textScaler: media.textScaler.clamp(maxScaleFactor: 1.15),
-      ),
-      child: Listener(
-        onPointerDown: (_) => _hold(),
-        onPointerUp: (_) => _release(),
-        onPointerCancel: (_) => _release(),
-        child: GestureDetector(
-          onHorizontalDragEnd: (details) {
-            final velocity = details.primaryVelocity ?? 0;
-            if (velocity < -200) {
-              _go(1);
-            } else if (velocity > 200) {
-              _go(-1);
-            }
-          },
-          child: SizedBox(
-            height: widget.height,
-            child: Stack(
-              children: [
-                // Soft shadow lives outside the fade so it never flickers.
-                Positioned.fill(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(_cardRadius + 2),
-                      boxShadow: [
-                        BoxShadow(
-                          color: _headerStart.withValues(alpha: .22),
-                          blurRadius: 26,
-                          offset: const Offset(0, 12),
-                        ),
-                      ],
+    final radius = BorderRadius.circular(_cardRadius + 2);
+    return Listener(
+      onPointerDown: (_) => _holding = true,
+      onPointerUp: (_) => _holding = false,
+      onPointerCancel: (_) => _holding = false,
+      child: SizedBox(
+        height: widget.height,
+        child: RepaintBoundary(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              boxShadow: [
+                BoxShadow(
+                  color: _headerStart.withValues(alpha: .2),
+                  blurRadius: 20,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: radius,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  AnimatedSwitcher(
+                    duration: reduceMotion ? Duration.zero : _medium * 1.6,
+                    switchInCurve: Curves.easeOut,
+                    switchOutCurve: Curves.easeIn,
+                    transitionBuilder: (child, animation) =>
+                        FadeTransition(opacity: animation, child: child),
+                    child: _PromoSlide(
+                      key: ValueKey(_index),
+                      data: _promos[_index],
+                      onTap: widget.onTap,
                     ),
                   ),
-                ),
-                Positioned.fill(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(_cardRadius + 2),
-                    child: AnimatedSwitcher(
-                      duration: reduceMotion
-                          ? Duration.zero
-                          : const Duration(milliseconds: 650),
-                      switchInCurve: Curves.easeOutCubic,
-                      switchOutCurve: Curves.easeInCubic,
-                      transitionBuilder: (child, animation) {
-                        final fade = FadeTransition(
-                          opacity: animation,
-                          child: child,
-                        );
-                        if (reduceMotion) return fade;
-                        return SlideTransition(
-                          position:
-                              Tween<Offset>(
-                                begin: const Offset(0, .08),
-                                end: Offset.zero,
-                              ).animate(
-                                CurvedAnimation(
-                                  parent: animation,
-                                  curve: Curves.easeOutCubic,
-                                ),
-                              ),
-                          child: fade,
-                        );
-                      },
-                      child: _PromoSlide(
-                        key: ValueKey(_index),
-                        data: _promos[_index],
-                        onTap: widget.onTap,
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  right: 20,
-                  bottom: 20,
-                  child: ExcludeSemantics(
-                    child: AnimatedBuilder(
-                      animation: _progress,
-                      builder: (context, _) => Row(
+                  Positioned(
+                    right: 20,
+                    bottom: 20,
+                    child: ExcludeSemantics(
+                      child: Row(
                         children: [
-                          for (var i = 0; i < _promos.length; i++) ...[
-                            if (i > 0) const SizedBox(width: 4),
-                            _ProgressSegment(
-                              fill: i < _index
-                                  ? 1
-                                  : i == _index
-                                  ? _progress.value
-                                  : 0,
+                          for (var i = 0; i < _promos.length; i++)
+                            AnimatedContainer(
+                              duration: _fast,
+                              margin: EdgeInsets.only(left: i == 0 ? 0 : 4),
+                              width: i == _index ? 18 : 6,
+                              height: 4,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(
+                                  alpha: i == _index ? 1 : .4,
+                                ),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
                             ),
-                          ],
                         ],
                       ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
       ),
     );
   }
-}
-
-class _ProgressSegment extends StatelessWidget {
-  const _ProgressSegment({required this.fill});
-
-  final double fill;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    width: 20,
-    height: 3,
-    decoration: BoxDecoration(
-      color: Colors.white.withValues(alpha: .3),
-      borderRadius: BorderRadius.circular(2),
-    ),
-    child: Align(
-      alignment: Alignment.centerLeft,
-      child: FractionallySizedBox(
-        widthFactor: fill.clamp(0.0, 1.0),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(2),
-          ),
-          child: const SizedBox(height: 3),
-        ),
-      ),
-    ),
-  );
 }
 
 class _PromoSlide extends StatelessWidget {
@@ -1705,108 +1647,114 @@ class _PromoSlide extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => DecoratedBox(
-    decoration: BoxDecoration(
-      gradient: LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: data.colors,
-      ),
-    ),
-    child: Stack(
-      children: [
-        Positioned(
-          right: -40,
-          top: -56,
-          child: _SoftCircle(size: 190, alpha: .09),
-        ),
-        Positioned(
-          right: 46,
-          bottom: -84,
-          child: _SoftCircle(size: 170, alpha: .06),
-        ),
-        Positioned(
-          right: 22,
-          top: 0,
-          bottom: 0,
-          child: Center(
-            child: Icon(
-              data.icon,
-              size: 92,
-              color: Colors.white.withValues(alpha: .22),
-            ),
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      // Narrow phones get a smaller icon and more room for the text.
+      final narrow = constraints.maxWidth < 300;
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: data.colors,
           ),
         ),
-        Material(
-          type: MaterialType.transparency,
-          child: InkWell(
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(22, 18, 120, 18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    data.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: _t(
-                      21,
-                      w: FontWeight.w800,
-                      c: Colors.white,
-                      h: 1.15,
-                      ls: -.4,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    data.subtitle,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: _t(
-                      12.5,
-                      w: FontWeight.w500,
-                      c: Colors.white.withValues(alpha: .88),
-                      h: 1.4,
-                    ),
-                  ),
-                  const Spacer(),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          data.cta,
-                          style: _t(
-                            12.5,
-                            w: FontWeight.w800,
-                            c: data.colors.first,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(
-                          Icons.arrow_forward_rounded,
-                          size: 15,
-                          color: data.colors.first,
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+        child: Stack(
+          children: [
+            Positioned(
+              right: -40,
+              top: -56,
+              child: _SoftCircle(size: 190, alpha: .09),
+            ),
+            Positioned(
+              right: 46,
+              bottom: -84,
+              child: _SoftCircle(size: 170, alpha: .06),
+            ),
+            Positioned(
+              right: 22,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: Icon(
+                  data.icon,
+                  size: narrow ? 68 : 92,
+                  color: Colors.white.withValues(alpha: .22),
+                ),
               ),
             ),
-          ),
+            Material(
+              type: MaterialType.transparency,
+              child: InkWell(
+                onTap: onTap,
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(22, 18, narrow ? 80 : 120, 18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        data.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: _t(
+                          narrow ? 19 : 21,
+                          w: FontWeight.w800,
+                          c: Colors.white,
+                          h: 1.15,
+                          ls: -.4,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        data.subtitle,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: _t(
+                          12.5,
+                          w: FontWeight.w500,
+                          c: Colors.white.withValues(alpha: .88),
+                          h: 1.4,
+                        ),
+                      ),
+                      const Spacer(),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              data.cta,
+                              style: _t(
+                                12.5,
+                                w: FontWeight.w800,
+                                c: data.colors.first,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Icon(
+                              Icons.arrow_forward_rounded,
+                              size: 15,
+                              color: data.colors.first,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
-      ],
-    ),
+      );
+    },
   );
 }
 
@@ -1834,14 +1782,20 @@ class _SoftCircle extends StatelessWidget {
 // ============================================================
 
 class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({super.key, required this.title, this.trailing});
+  const _SectionHeader({
+    super.key,
+    required this.gutter,
+    required this.title,
+    this.trailing,
+  });
 
+  final double gutter;
   final String title;
   final String? trailing;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(_pagePadding, 14, _pagePadding, 12),
+    padding: EdgeInsets.fromLTRB(gutter, 14, gutter, 12),
     child: Row(
       children: [
         Expanded(
@@ -1859,12 +1813,14 @@ class _SectionHeader extends StatelessWidget {
 
 class _FilterRow extends StatelessWidget {
   const _FilterRow({
+    required this.gutter,
     required this.sort,
     required this.openNowOnly,
     required this.onSort,
     required this.onToggleOpen,
   });
 
+  final double gutter;
   final _StationSort sort;
   final bool openNowOnly;
   final ValueChanged<_StationSort> onSort;
@@ -1875,11 +1831,7 @@ class _FilterRow extends StatelessWidget {
     height: 52,
     child: ListView(
       scrollDirection: Axis.horizontal,
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.symmetric(
-        horizontal: _pagePadding,
-        vertical: 7,
-      ),
+      padding: EdgeInsets.symmetric(horizontal: gutter, vertical: 7),
       children: [
         _FilterChipButton(
           label: 'Open now',
@@ -1959,10 +1911,12 @@ class _FilterChipButton extends StatelessWidget {
 
 // ============================================================
 // STATION CARD
+// No blur filters: every badge is a plain translucent pill, which keeps
+// each card cheap to paint while scrolling.
 // ============================================================
 
 class _StationCard extends StatefulWidget {
-  const _StationCard({required this.station, required this.onTap});
+  const _StationCard({super.key, required this.station, required this.onTap});
 
   final NearbyStation station;
   final VoidCallback onTap;
@@ -1990,43 +1944,13 @@ class _StationCardState extends State<_StationCard> {
         : null;
     final hasRating = station.ratingCount > 0 && station.ratingAverage != null;
 
-    Widget media = Stack(
-      fit: StackFit.expand,
-      children: [
-        const _StationImagePlaceholder(),
-        if (imageUrl != null)
-          Image.network(
-            imageUrl,
-            fit: BoxFit.cover,
-            frameBuilder: (context, child, frame, loadedSynchronously) =>
-                loadedSynchronously
-                ? child
-                : AnimatedOpacity(
-                    opacity: frame == null ? 0 : 1,
-                    duration: const Duration(milliseconds: 350),
-                    curve: Curves.easeOut,
-                    child: child,
-                  ),
-            errorBuilder: (context, error, stackTrace) =>
-                const SizedBox.shrink(),
-          ),
-      ],
-    );
-    if (closed) {
-      media = ColorFiltered(
-        colorFilter: ColorFilter.mode(
-          Colors.grey.withValues(alpha: .7),
-          BlendMode.saturation,
-        ),
-        child: media,
-      );
-    }
-
     return Semantics(
       button: true,
       label:
           '${station.name}, ${closed ? 'closed' : 'open now'}, '
-          '${formatDistance(station.distanceKm)} away',
+          '${formatDistance(station.distanceKm)} away'
+          '${hasRating ? ', rated ${station.ratingAverage!.toStringAsFixed(1)} '
+                    'from ${station.ratingCount} ${station.ratingCount == 1 ? 'rating' : 'ratings'}' : ', no ratings yet'}',
       child: AnimatedScale(
         scale: _pressed ? .98 : 1,
         duration: const Duration(milliseconds: 140),
@@ -2039,8 +1963,8 @@ class _StationCardState extends State<_StationCard> {
             boxShadow: [
               BoxShadow(
                 color: _navy.withValues(alpha: .06),
-                blurRadius: 22,
-                offset: const Offset(0, 8),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
               ),
             ],
           ),
@@ -2054,64 +1978,63 @@ class _StationCardState extends State<_StationCard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  SizedBox(
-                    height: 150,
-                    width: double.infinity,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        media,
-                        Positioned.fill(
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [
-                                  Colors.black.withValues(alpha: .16),
-                                  Colors.transparent,
-                                  Colors.black.withValues(alpha: .20),
-                                ],
-                                stops: const [0, .45, 1],
-                              ),
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          left: 12,
-                          top: 12,
-                          child: _FrostedPill(
-                            icon: null,
-                            dotColor: closed ? textGray : success,
-                            label: closed ? 'Closed' : 'Open now',
-                          ),
-                        ),
-                        Positioned(
-                          right: 12,
-                          top: 12,
-                          child: _FrostedPill(
-                            icon: Icons.near_me_rounded,
-                            label: formatDistance(station.distanceKm),
-                          ),
-                        ),
-                        Positioned(
-                          left: 12,
-                          bottom: 12,
-                          child: hasRating
-                              ? _FrostedPill(
-                                  icon: Icons.star_rounded,
-                                  iconColor: warning,
-                                  label:
-                                      '${station.ratingAverage!.toStringAsFixed(1)} (${station.ratingCount})',
-                                )
-                              : const _FrostedPill(
-                                  icon: Icons.auto_awesome_rounded,
-                                  iconColor: primaryBlue,
-                                  label: 'New',
+                  // The photo scales with the card width: 140 to 200 px tall.
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final height = (constraints.maxWidth * .42).clamp(
+                        140.0,
+                        200.0,
+                      );
+                      return SizedBox(
+                        height: height,
+                        width: double.infinity,
+                        child: _StationPhoto(
+                          imageUrl: imageUrl,
+                          cacheWidth:
+                              (constraints.maxWidth *
+                                      MediaQuery.devicePixelRatioOf(context))
+                                  .round(),
+                          closed: closed,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Positioned(
+                                left: 12,
+                                top: 12,
+                                child: _Pill(
+                                  dotColor: closed ? textGray : success,
+                                  label: closed ? 'Closed' : 'Open now',
                                 ),
+                              ),
+                              Positioned(
+                                right: 12,
+                                top: 12,
+                                child: _Pill(
+                                  icon: Icons.near_me_rounded,
+                                  label: formatDistance(station.distanceKm),
+                                ),
+                              ),
+                              Positioned(
+                                left: 12,
+                                bottom: 12,
+                                child: hasRating
+                                    ? _Pill(
+                                        icon: Icons.star_rounded,
+                                        iconColor: warning,
+                                        label:
+                                            '${station.ratingAverage!.toStringAsFixed(1)} · '
+                                            '${station.ratingCount} ${station.ratingCount == 1 ? 'rating' : 'ratings'}',
+                                      )
+                                    : const _Pill(
+                                        icon: Icons.auto_awesome_rounded,
+                                        label: 'New',
+                                      ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ],
-                    ),
+                      );
+                    },
                   ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
@@ -2190,19 +2113,15 @@ class _StationCardState extends State<_StationCard> {
                             ),
                             const Spacer(),
                             if (station.estimatedDeliveryMinutes != null) ...[
-                              Row(
-                                children: [
-                                  const Icon(
-                                    Icons.timer_outlined,
-                                    size: 15,
-                                    color: textGray,
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Text(
-                                    '${station.estimatedDeliveryMinutes} min',
-                                    style: _t(12.5, w: FontWeight.w700),
-                                  ),
-                                ],
+                              const Icon(
+                                Icons.timer_outlined,
+                                size: 15,
+                                color: textGray,
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                '${station.estimatedDeliveryMinutes} min',
+                                style: _t(12.5, w: FontWeight.w700),
                               ),
                               const SizedBox(width: 14),
                             ],
@@ -2234,9 +2153,79 @@ class _StationCardState extends State<_StationCard> {
   }
 }
 
-/// Frosted white badge that stays readable over any photo.
-class _FrostedPill extends StatelessWidget {
-  const _FrostedPill({
+/// Photo with a placeholder underneath, a soft top and bottom shade, and the
+/// card badges on top. Images are decoded at display size to save memory.
+class _StationPhoto extends StatelessWidget {
+  const _StationPhoto({
+    required this.imageUrl,
+    required this.cacheWidth,
+    required this.closed,
+    required this.child,
+  });
+
+  final String? imageUrl;
+  final int cacheWidth;
+  final bool closed;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget media = Stack(
+      fit: StackFit.expand,
+      children: [
+        const _StationImagePlaceholder(),
+        if (imageUrl != null)
+          Image.network(
+            imageUrl!,
+            fit: BoxFit.cover,
+            cacheWidth: cacheWidth,
+            gaplessPlayback: true,
+            frameBuilder: (context, image, frame, loadedSynchronously) =>
+                loadedSynchronously
+                ? image
+                : AnimatedOpacity(
+                    opacity: frame == null ? 0 : 1,
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeOut,
+                    child: image,
+                  ),
+            errorBuilder: (context, error, stackTrace) =>
+                const SizedBox.shrink(),
+          ),
+      ],
+    );
+    if (closed) {
+      media = ColorFiltered(
+        colorFilter: ColorFilter.mode(
+          Colors.grey.withValues(alpha: .7),
+          BlendMode.saturation,
+        ),
+        child: media,
+      );
+    }
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        media,
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0x29000000), Color(0x00000000), Color(0x33000000)],
+              stops: [0, .45, 1],
+            ),
+          ),
+        ),
+        child,
+      ],
+    );
+  }
+}
+
+/// Plain translucent white badge, readable over any photo, no blur.
+class _Pill extends StatelessWidget {
+  const _Pill({
     required this.label,
     this.icon,
     this.iconColor = primaryBlue,
@@ -2249,37 +2238,28 @@ class _FrostedPill extends StatelessWidget {
   final Color? dotColor;
 
   @override
-  Widget build(BuildContext context) => ClipRRect(
-    borderRadius: BorderRadius.circular(20),
-    child: BackdropFilter(
-      filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: .9),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (dotColor != null) ...[
-              Container(
-                width: 7,
-                height: 7,
-                decoration: BoxDecoration(
-                  color: dotColor,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 6),
-            ] else if (icon != null) ...[
-              Icon(icon, size: 13, color: iconColor),
-              const SizedBox(width: 4),
-            ],
-            Text(label, style: _t(11.5, w: FontWeight.w800)),
-          ],
-        ),
-      ),
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(
+      color: const Color(0xF2FFFFFF),
+      borderRadius: BorderRadius.circular(20),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (dotColor != null) ...[
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 6),
+        ] else if (icon != null) ...[
+          Icon(icon, size: 13, color: iconColor),
+          const SizedBox(width: 4),
+        ],
+        Text(label, style: _t(11.5, w: FontWeight.w800)),
+      ],
     ),
   );
 }
@@ -2318,32 +2298,25 @@ class _StationImagePlaceholder extends StatelessWidget {
 // LOADING / EMPTY STATES
 // ============================================================
 
-class _SlideGradient extends GradientTransform {
-  const _SlideGradient(this.percent);
-
-  final double percent;
-
-  @override
-  Matrix4? transform(Rect bounds, {TextDirection? textDirection}) =>
-      Matrix4.translationValues(bounds.width * percent, 0, 0);
-}
-
-/// Sweeps a soft highlight across opaque placeholder shapes.
-class _Shimmer extends StatefulWidget {
-  const _Shimmer({required this.child});
+/// A gentle opacity pulse. Much cheaper than a moving shimmer gradient.
+class _Pulse extends StatefulWidget {
+  const _Pulse({required this.child});
 
   final Widget child;
 
   @override
-  State<_Shimmer> createState() => _ShimmerState();
+  State<_Pulse> createState() => _PulseState();
 }
 
-class _ShimmerState extends State<_Shimmer>
-    with SingleTickerProviderStateMixin {
+class _PulseState extends State<_Pulse> with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1700),
+    duration: const Duration(milliseconds: 900),
   );
+  late final Animation<double> _opacity = Tween<double>(
+    begin: .55,
+    end: 1,
+  ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
   @override
   void didChangeDependencies() {
@@ -2351,7 +2324,7 @@ class _ShimmerState extends State<_Shimmer>
     if (_reduceMotion(context)) {
       _controller.stop();
     } else if (!_controller.isAnimating) {
-      _controller.repeat();
+      _controller.repeat(reverse: true);
     }
   }
 
@@ -2362,21 +2335,8 @@ class _ShimmerState extends State<_Shimmer>
   }
 
   @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-    animation: _controller,
-    child: widget.child,
-    builder: (context, child) => ShaderMask(
-      blendMode: BlendMode.srcATop,
-      shaderCallback: (bounds) => LinearGradient(
-        begin: const Alignment(-1, -.3),
-        end: const Alignment(1, .3),
-        colors: const [Color(0xFFE6EEF7), Color(0xFFF6FAFE), Color(0xFFE6EEF7)],
-        stops: const [.1, .3, .5],
-        transform: _SlideGradient(_controller.value * 2 - 1),
-      ).createShader(bounds),
-      child: child,
-    ),
-  );
+  Widget build(BuildContext context) =>
+      FadeTransition(opacity: _opacity, child: widget.child);
 }
 
 class _SkeletonCard extends StatelessWidget {
@@ -2386,7 +2346,7 @@ class _SkeletonCard extends StatelessWidget {
     width: width,
     height: height,
     decoration: BoxDecoration(
-      color: Colors.white,
+      color: _skeleton,
       borderRadius: BorderRadius.circular(8),
     ),
   );
@@ -2401,11 +2361,11 @@ class _SkeletonCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(_cardRadius),
         border: Border.all(color: _hairline),
       ),
-      child: _Shimmer(
+      child: _Pulse(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(height: 150, color: Colors.white),
+            Container(height: 150, color: _skeleton),
             Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -2469,11 +2429,34 @@ class _MarketplaceStateCard extends StatelessWidget {
 // ============================================================
 
 class _HomeFooter extends StatelessWidget {
-  const _HomeFooter();
+  const _HomeFooter({required this.gutter});
+
+  final double gutter;
+
+  static const _benefits = <(IconData, Color, String, String)>[
+    (
+      Icons.verified_rounded,
+      primaryBlue,
+      'Verified stations',
+      'Reviewed by our team',
+    ),
+    (
+      Icons.receipt_long_rounded,
+      _aqua,
+      'Clear pricing',
+      'Water, deposit and fees upfront',
+    ),
+    (
+      Icons.payments_rounded,
+      _mint,
+      'Pay on delivery',
+      'Cash on delivery by default',
+    ),
+  ];
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(_pagePadding, 4, _pagePadding, 44),
+    padding: EdgeInsets.fromLTRB(gutter, 4, gutter, 44),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -2482,38 +2465,41 @@ class _HomeFooter extends StatelessWidget {
           style: _t(16, w: FontWeight.w800, ls: -.2),
         ),
         const SizedBox(height: 12),
-        const IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: _BenefitTile(
-                  icon: Icons.verified_rounded,
-                  color: primaryBlue,
-                  title: 'Verified stations',
-                  subtitle: 'Reviewed by our team',
+        // Three tiles side by side on normal phones, stacked on very narrow
+        // ones, so the text always has room.
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final tiles = [
+              for (final (icon, color, title, subtitle) in _benefits)
+                _BenefitTile(
+                  icon: icon,
+                  color: color,
+                  title: title,
+                  subtitle: subtitle,
                 ),
+            ];
+            if (constraints.maxWidth < 320) {
+              return Column(
+                children: [
+                  for (var i = 0; i < tiles.length; i++) ...[
+                    if (i > 0) const SizedBox(height: 10),
+                    SizedBox(width: double.infinity, child: tiles[i]),
+                  ],
+                ],
+              );
+            }
+            return IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var i = 0; i < tiles.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 10),
+                    Expanded(child: tiles[i]),
+                  ],
+                ],
               ),
-              SizedBox(width: 10),
-              Expanded(
-                child: _BenefitTile(
-                  icon: Icons.receipt_long_rounded,
-                  color: _aqua,
-                  title: 'Clear pricing',
-                  subtitle: 'Water, deposit and fees upfront',
-                ),
-              ),
-              SizedBox(width: 10),
-              Expanded(
-                child: _BenefitTile(
-                  icon: Icons.payments_rounded,
-                  color: _mint,
-                  title: 'Pay on delivery',
-                  subtitle: 'Cash on delivery by default',
-                ),
-              ),
-            ],
-          ),
+            );
+          },
         ),
         const SizedBox(height: 32),
         Center(

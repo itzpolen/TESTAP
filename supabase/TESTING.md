@@ -15,7 +15,7 @@ Customer suspension/reactivation must go through the `set_customer_status` Edge 
 
 Set these secrets in the Supabase Edge Function environment:
 
-- `paymongotestmodekys`
+- `PAYMONGO_KEY`
 - `PAYMONGO_WEBHOOK_SECRET`
 - `PAYMONGO_SUCCESS_URL`
 - `PAYMONGO_CANCEL_URL`
@@ -25,13 +25,18 @@ Set these secrets in the Supabase Edge Function environment:
 
 For a local Supabase CLI workflow, deploy the checkout function with
 `supabase functions deploy create_paymongo_checkout`, then add the PayMongo
-test secret and HTTPS success/cancel URLs under the project's Edge Function
-secrets. Switch to live credentials only after completing the payment and
-webhook checks below. Do not add `paymongotestmodekys` to the Flutter `.env`.
+`PAYMONGO_KEY` and HTTPS success/cancel URLs under the project's Edge Function
+secrets. Use the PayMongo test key while testing, and switch to live credentials
+only when ready to accept real payments after completing the payment and
+webhook checks below. Do not add `PAYMONGO_KEY` to the Flutter `.env`.
 The customer Flutter app creates orders through the authenticated `create_order`
 RPC and starts online payment by invoking `create_paymongo_checkout` with the
 returned order ID. Deploy the function before testing the PayMongo choice; no
 PayMongo credential belongs in Flutter's `.env` or a client build.
+The checkout session requests GCash, Maya, QRPH, and cards. QRPH must also be
+enabled for the PayMongo account and in the applicable test/live mode; adding
+it to the request cannot enable a payment method that the account is not
+authorized to use.
 
 When deploying payment flow updates, deploy each changed function:
 `supabase functions deploy create_paymongo_checkout`,
@@ -41,24 +46,24 @@ When deploying payment flow updates, deploy each changed function:
 For GitHub Pages, set the repository's Pages source to **GitHub Actions** and
 add `SUPABASE_URL` and `SUPABASE_ANON_KEY` as repository Actions secrets. The
 `Deploy Flutter web app to GitHub Pages` workflow publishes the Flutter app
-from `build/web` and copies the root `index.html` payment-return screen to
-`payment-return.html`. The root file is a payment callback page, not the Flutter
-app homepage.
+from `build/web`. The return page is available at `/payment-return/`; the
+Flutter app remains at the site root.
 
-Set the PayMongo redirect secrets to that separate return page, with a
-different status query value:
+Set the PayMongo redirect secrets to the return page on the host you use. For
+the existing Netlify site:
 
 ```text
-PAYMONGO_SUCCESS_URL=https://<owner>.github.io/<repository>/payment-return.html?status=success
-PAYMONGO_CANCEL_URL=https://<owner>.github.io/<repository>/payment-return.html?status=cancel
+PAYMONGO_SUCCESS_URL=https://aquadirect09112006.netlify.app/?status=success
+PAYMONGO_CANCEL_URL=https://aquadirect09112006.netlify.app/?status=cancel
 ```
 
-Replace `<owner>` and `<repository>` with the actual GitHub Pages URL. For a
-user/organization site or custom domain, adjust the path to match that site's
-URL. The return page tells customers to go back to the app; it does not claim
-payment succeeded. The PayMongo webhook, not the redirect, is authoritative
-for payment status. Test with PayMongo test credentials and confirm the signed
-webhook updates the `payments` row before enabling live keys.
+The return page displays a separate result for `status=success`,
+`status=failed`, and `status=cancel`. PayMongo is configured with success and
+cancel redirect URLs, not a separate failed URL; use the cancel URL for
+checkout cancellations, and do not treat either redirect as authoritative
+payment status. The PayMongo webhook, not the redirect, confirms payment.
+Test with PayMongo test credentials and confirm the signed webhook updates
+the `payments` row before enabling live keys.
 
 Configure a trusted scheduler to POST `{}` to `process_payment_provider_actions` at least once per minute with the `x-worker-secret` header set to `AQUADIRECT_PAYMENT_WORKER_SECRET`. The schema's `pg_cron` job expires pending PayMongo and unaccepted COD orders; the Edge Function worker processes the resulting PayMongo checkout-expiry and refund outbox actions.
 

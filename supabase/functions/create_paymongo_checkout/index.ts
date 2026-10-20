@@ -51,6 +51,11 @@ Deno.serve(async (request) => {
 
     let session: Record<string, unknown>;
     if (payment.provider_checkout_id) {
+      if (payment.provider_checkout_id.startsWith("pi_")) {
+        return jsonResponse({
+          error: "This payment uses an in-app QR code. Resume it from the QR payment screen.",
+        }, 409);
+      }
       session = await paymongoRequest(`/checkout_sessions/${encodeURIComponent(payment.provider_checkout_id)}`);
     } else {
       const successUrl = Deno.env.get("PAYMONGO_SUCCESS_URL");
@@ -74,7 +79,7 @@ Deno.serve(async (request) => {
                 name: `AquaDirect order ${order.id}`,
                 quantity: 1,
               }],
-              payment_method_types: ["gcash", "paymaya", "card"],
+              payment_method_types: ["gcash", "paymaya", "qrph", "card"],
               description: `AquaDirect order ${order.id}`,
               success_url: successReturnUrl.toString(),
               cancel_url: cancelReturnUrl.toString(),

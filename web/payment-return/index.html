@@ -92,6 +92,11 @@
     if (status === "success") {
       title.textContent = "Payment submitted";
       message.textContent = "Return to AquaDirect. The app will check your payment status.";
+    } else if (status === "failed") {
+      title.textContent = "Payment failed";
+      message.textContent = "PayMongo did not confirm this payment. Return to AquaDirect to check your order or try again.";
+      icon.textContent = "!";
+      icon.classList.add("cancel");
     } else if (status === "cancel") {
       title.textContent = "Checkout cancelled";
       message.textContent = "No payment confirmation was received. Return to AquaDirect if you want to try again.";
