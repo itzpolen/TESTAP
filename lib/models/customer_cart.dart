@@ -231,6 +231,7 @@ class CustomerDeliveryTracking {
   const CustomerDeliveryTracking({
     required this.order,
     this.deliveryStatus,
+    this.riderNumber,
     this.riderName,
     this.riderPhone,
     this.estimatedDeliveryAt,
@@ -241,6 +242,7 @@ class CustomerDeliveryTracking {
 
   final CustomerOrder order;
   final String? deliveryStatus;
+  final int? riderNumber;
   final String? riderName;
   final String? riderPhone;
   final DateTime? estimatedDeliveryAt;

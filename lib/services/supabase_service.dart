@@ -1238,7 +1238,10 @@ class SupabaseService {
 
     final deliveries = await client
         .from('deliveries')
-        .select('id, order_id, status, rider_name, rider_phone, updated_at')
+        .select(
+          'id, order_id, status, rider_number, rider_name, rider_phone, '
+          'updated_at',
+        )
         .inFilter('order_id', orders.map((order) => order.id).toList());
     final deliveryByOrderId = <String, Map<String, dynamic>>{};
     final deliveryIds = <String>[];
@@ -1281,6 +1284,9 @@ class SupabaseService {
           return CustomerDeliveryTracking(
             order: order,
             deliveryStatus: delivery?['status'] as String?,
+            riderNumber: delivery?['rider_number'] is num
+                ? (delivery!['rider_number'] as num).toInt()
+                : null,
             riderName: delivery?['rider_name'] as String?,
             riderPhone: delivery?['rider_phone'] as String?,
             estimatedDeliveryAt: order.estimatedDeliveryAt,

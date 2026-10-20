@@ -1519,8 +1519,8 @@ class _DeliveryProgress extends StatelessWidget {
       'pending' => 0,
       'confirmed' => 1,
       'preparing' => 2,
-      'ready' => 3,
-      'rider_assigned' || 'out_for_delivery' => 4,
+      'ready' || 'rider_assigned' => 3,
+      'out_for_delivery' => 4,
       'delivered' => 5,
       _ => -1,
     };

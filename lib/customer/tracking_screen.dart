@@ -25,6 +25,7 @@ class _TrackScreenState extends State<TrackScreen> {
   int _loadSequence = 0;
   Timer? _refreshTimer;
   RealtimeChannel? _ordersChannel;
+  RealtimeChannel? _deliveriesChannel;
 
   @override
   void initState() {
@@ -46,6 +47,15 @@ class _TrackScreenState extends State<TrackScreen> {
             callback: (_) => _loadTracking(showLoading: false),
           )
           .subscribe();
+      _deliveriesChannel = SupabaseService.client
+          .channel('customer-tracking-deliveries-$customerId')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'deliveries',
+            callback: (_) => _loadTracking(showLoading: false),
+          )
+          .subscribe();
     }
     _refreshTimer = Timer.periodic(
       const Duration(seconds: 30),
@@ -59,6 +69,10 @@ class _TrackScreenState extends State<TrackScreen> {
     final channel = _ordersChannel;
     if (channel != null) {
       unawaited(SupabaseService.client.removeChannel(channel));
+    }
+    final deliveriesChannel = _deliveriesChannel;
+    if (deliveriesChannel != null) {
+      unawaited(SupabaseService.client.removeChannel(deliveriesChannel));
     }
     super.dispose();
   }
@@ -458,6 +472,7 @@ class _TrackingTimeline extends StatelessWidget {
     ('Confirmed', 'The station has accepted your order'),
     ('Preparing', 'Your water is being prepared'),
     ('Ready', 'Your order is ready for delivery'),
+    ('Out for delivery', 'The rider is on the way to your address'),
     ('Delivered', 'Your order has been delivered'),
   ];
 
@@ -478,8 +493,9 @@ class _TrackingTimeline extends StatelessWidget {
       'pending' => 0,
       'confirmed' => 1,
       'preparing' => 2,
-      'ready' || 'rider_assigned' || 'out_for_delivery' => 3,
-      'delivered' => 4,
+      'ready' || 'rider_assigned' => 3,
+      'out_for_delivery' => 4,
+      'delivered' => 5,
       _ => 0,
     };
     return _TrackingCard(
@@ -582,6 +598,11 @@ class _DeliveryDetails extends StatelessWidget {
     final order = tracking.order;
     final riderName = tracking.riderName?.trim();
     final riderPhone = tracking.riderPhone?.trim();
+    final riderNumber = tracking.riderNumber;
+    final riderLabel = [
+      if (riderNumber != null) 'Rider ${riderNumber.toString().padLeft(2, '0')}',
+      if (riderName?.isNotEmpty == true) riderName,
+    ].join(' · ');
     return _TrackingCard(
       title: 'Delivery information',
       child: Column(
@@ -609,7 +630,7 @@ class _DeliveryDetails extends StatelessWidget {
             _InfoRow(
               icon: Icons.person_outline_rounded,
               title: 'Rider',
-              value: riderName!,
+              value: riderLabel,
             ),
           ],
           if (riderPhone?.isNotEmpty == true) ...[
