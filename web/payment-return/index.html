@@ -1,26 +1,28 @@
-
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f7f9fc">
+  <meta name="theme-color" content="#f4f6f9">
   <meta name="color-scheme" content="light">
-  <title>Payment Status | AquaDirect</title>
+  <title>Payment Status</title>
 
   <style>
     :root {
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
-        Roboto, Helvetica, Arial, sans-serif;
-      color: #17243a;
-      background: #f7f9fc;
-      font-synthesis: none;
-      text-rendering: optimizeLegibility;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
+      --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        Roboto, "Helvetica Neue", Arial, sans-serif;
+      --ink: #111827;
+      --body: #4b5563;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --page: #f4f6f9;
+      --brand: #1d4ed8;
+      --brand-dark: #1e40af;
     }
 
     * { box-sizing: border-box; }
+
+    html { -webkit-text-size-adjust: 100%; }
 
     body {
       min-height: 100vh;
@@ -28,337 +30,197 @@
       margin: 0;
       display: flex;
       flex-direction: column;
-      overflow-x: hidden;
-      background:
-        radial-gradient(ellipse at 50% 35%, var(--glow), transparent 48%),
-        #f7f9fc;
-      transition: background 350ms ease;
-    }
-
-    body.success {
-      --accent: #159447;
-      --accent-dark: #10783a;
-      --glow: rgba(34, 197, 94, .12);
-      --soft: #e8f8ee;
-      --ring: rgba(34, 197, 94, .16);
-    }
-
-    body.failed,
-    body.cancel {
-      --accent: #dc3535;
-      --accent-dark: #bd2929;
-      --glow: rgba(239, 68, 68, .10);
-      --soft: #fff0f0;
-      --ring: rgba(239, 68, 68, .13);
-    }
-
-    body.unknown {
-      --accent: #64748b;
-      --accent-dark: #475569;
-      --glow: rgba(100, 116, 139, .08);
-      --soft: #edf1f6;
-      --ring: rgba(100, 116, 139, .12);
-    }
-
-    header {
-      width: 100%;
-      padding: 27px clamp(20px, 5vw, 64px);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-    }
-
-    .brand {
-      display: inline-flex;
-      align-items: center;
-      gap: 11px;
-      color: #17243a;
-      font-size: 19px;
-      font-weight: 800;
-      letter-spacing: -0.7px;
-    }
-
-    .brand-mark {
-      width: 35px;
-      height: 35px;
-      display: grid;
-      place-items: center;
-      border-radius: 11px;
-      color: #fff;
-      background: #087cf0;
-    }
-
-    .brand-mark svg { width: 23px; height: 23px; }
-
-    .secure-label {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      color: #64748b;
-      font-size: 12px;
-      font-weight: 600;
-    }
-
-    .secure-label svg {
-      width: 15px;
-      height: 15px;
-      color: #159447;
-    }
-
-    main {
-      flex: 1;
-      width: 100%;
-      display: flex;
       align-items: center;
       justify-content: center;
-      padding: 28px 22px 64px;
+      padding: 24px 16px;
+      font-family: var(--font);
+      color: var(--ink);
+      background: var(--page);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
 
-    .content {
+    body.success { --accent: #15803d; --tint: #ecfdf3; --edge: #bbf7d0; }
+    body.failed,
+    body.cancel  { --accent: #b91c1c; --tint: #fef2f2; --edge: #fecaca; }
+    body.unknown { --accent: #475569; --tint: #f1f5f9; --edge: #cbd5e1; }
+
+    .card {
       width: 100%;
-      max-width: 550px;
+      max-width: 440px;
+      overflow: hidden;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, .04),
+        0 12px 32px rgba(16, 24, 40, .07);
+      animation: enter .4s ease-out both;
+    }
+
+    .accent-bar { height: 4px; background: var(--accent); }
+
+    .card-body {
+      padding: 36px 32px 28px;
       text-align: center;
-      animation: content-enter .65s cubic-bezier(.2, .8, .2, 1) both;
     }
 
-    .status-visual {
-      position: relative;
-      width: 142px;
-      height: 142px;
-      margin: 0 auto 32px;
-      display: grid;
-      place-items: center;
-    }
-
-    .orbit {
-      position: absolute;
-      inset: 0;
-      border: 1px solid var(--ring);
-      border-radius: 50%;
-      animation: orbit-in 1s ease-out both;
-    }
-
-    .orbit::before {
-      content: "";
-      position: absolute;
-      inset: 11px;
-      border: 1px dashed var(--ring);
-      border-radius: 50%;
-    }
-
-    .icon-circle {
-      position: relative;
-      width: 94px;
-      height: 94px;
+    .icon {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 22px;
       display: grid;
       place-items: center;
       border-radius: 50%;
       color: var(--accent);
-      background: var(--soft);
-      box-shadow: 0 0 0 10px var(--ring);
-      animation: icon-pop .65s cubic-bezier(.18, .89, .32, 1.35) both;
+      background: var(--tint);
+      box-shadow: 0 0 0 6px var(--tint), 0 0 0 7px var(--edge);
     }
 
-    .icon-circle svg {
-      width: 49px;
-      height: 49px;
-      overflow: visible;
-    }
+    .icon svg { width: 30px; height: 30px; }
 
-    .icon-circle .draw {
+    .icon .draw {
       fill: none;
       stroke: currentColor;
-      stroke-width: 3.5;
+      stroke-width: 2.6;
       stroke-linecap: round;
       stroke-linejoin: round;
-      stroke-dasharray: 60;
-      stroke-dashoffset: 60;
-      animation: draw-line .65s .25s ease-out forwards;
+      stroke-dasharray: 48;
+      stroke-dashoffset: 48;
+      animation: draw .5s .2s ease-out forwards;
+    }
+
+    .status {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
     }
 
     h1 {
       margin: 0;
-      font-size: clamp(32px, 6vw, 45px);
-      line-height: 1.13;
-      letter-spacing: -1.8px;
-      font-weight: 800;
-      color: #17243a;
+      font-size: 24px;
+      line-height: 1.25;
+      font-weight: 650;
+      letter-spacing: -.01em;
     }
 
     .message {
-      max-width: 420px;
-      margin: 18px auto 0;
-      color: #64748b;
-      font-size: 16px;
-      line-height: 1.8;
+      margin: 12px auto 0;
+      max-width: 340px;
+      color: var(--body);
+      font-size: 15px;
+      line-height: 1.6;
     }
 
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 20px;
-      padding: 8px 13px;
-      border-radius: 100px;
-      color: var(--accent-dark);
-      background: var(--soft);
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: .075em;
-      text-transform: uppercase;
+    .details {
+      margin: 26px 0 0;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fafbfc;
+      text-align: left;
     }
 
-    .status-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: currentColor;
+    .row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 13px 16px;
+      font-size: 14px;
     }
 
-    .order-reference {
-      margin: 26px auto 0;
-      color: #64748b;
-      font-size: 12px;
+    .row + .row { border-top: 1px solid var(--line); }
+
+    .row dt { margin: 0; color: var(--muted); flex: none; }
+
+    .row dd {
+      margin: 0;
+      min-width: 0;
+      color: var(--ink);
+      font-weight: 600;
+      text-align: right;
       overflow-wrap: anywhere;
     }
 
-    .order-reference strong {
-      display: block;
-      margin-top: 7px;
-      color: #344256;
+    .row dd.ref {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 13px;
-      font-weight: 700;
     }
+
+    .row dd.state { color: var(--accent); }
 
     .notice {
-      max-width: 440px;
-      margin: 27px auto 0;
-      padding: 14px 17px;
-      display: flex;
-      align-items: flex-start;
-      gap: 11px;
-      border: 1px solid #e5eaf1;
-      border-radius: 12px;
-      background: rgba(255, 255, 255, .65);
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
       text-align: left;
-      color: #64748b;
-      font-size: 12px;
-      line-height: 1.7;
     }
 
-    .notice svg {
-      flex: 0 0 auto;
-      width: 18px;
-      height: 18px;
-      margin-top: 1px;
-      color: #64748b;
-    }
+    .notice strong { color: var(--body); font-weight: 600; }
 
-    .notice strong {
-      color: #344256;
-    }
+    .actions { margin-top: 26px; }
 
-    .actions {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 13px;
-      margin-top: 32px;
-    }
-
-    .return-link {
-      width: min(100%, 330px);
-      min-height: 54px;
-      padding: 0 24px;
+    .primary {
+      width: 100%;
+      min-height: 48px;
+      padding: 0 20px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 10px;
-      border-radius: 14px;
+      gap: 8px;
+      border-radius: 10px;
       color: #fff;
-      background: #087cf0;
-      box-shadow: 0 7px 18px rgba(8, 124, 240, .2);
+      background: var(--brand);
+      font-family: inherit;
       font-size: 15px;
-      font-weight: 750;
-      text-decoration: none;
-      transition: transform .2s ease, background .2s ease,
-        box-shadow .2s ease;
-    }
-
-    .return-link:hover {
-      background: #066bd1;
-      box-shadow: 0 10px 24px rgba(8, 124, 240, .25);
-      transform: translateY(-2px);
-    }
-
-    .return-link:active { transform: translateY(0); }
-
-    .return-link svg {
-      width: 19px;
-      height: 19px;
-    }
-
-    .secondary {
-      padding: 9px 14px;
-      color: #64748b;
-      font-size: 13px;
       font-weight: 600;
       text-decoration: none;
+      transition: background .15s ease, box-shadow .15s ease;
     }
 
-    .secondary:hover { color: #17243a; }
+    .primary:hover { background: var(--brand-dark); }
 
-    footer {
-      padding: 20px;
-      color: #94a3b8;
-      text-align: center;
-      font-size: 11px;
+    .primary:focus-visible {
+      outline: 3px solid rgba(29, 78, 216, .35);
+      outline-offset: 2px;
     }
 
-    @keyframes content-enter {
-      from { opacity: 0; transform: translateY(14px); }
-      to { opacity: 1; transform: translateY(0); }
+    .primary svg { width: 18px; height: 18px; }
+
+    .card-foot {
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border-top: 1px solid var(--line);
+      background: #fafbfc;
+      color: var(--muted);
+      font-size: 12px;
     }
 
-    @keyframes icon-pop {
-      0% { opacity: 0; transform: scale(.55); }
-      70% { opacity: 1; transform: scale(1.08); }
-      100% { opacity: 1; transform: scale(1); }
+    .card-foot svg { width: 14px; height: 14px; color: #15803d; flex: none; }
+
+    @keyframes enter {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
     }
 
-    @keyframes draw-line {
-      to { stroke-dashoffset: 0; }
-    }
+    @keyframes draw { to { stroke-dashoffset: 0; } }
 
-    @keyframes orbit-in {
-      from { opacity: 0; transform: scale(.75); }
-      to { opacity: 1; transform: scale(1); }
-    }
-
-    @media (max-width: 480px) {
-      header { padding: 20px; }
-      .brand { font-size: 17px; }
-      .secure-label { font-size: 11px; }
-      main { padding: 20px 22px 42px; }
-      .status-visual {
-        width: 126px;
-        height: 126px;
-        margin-bottom: 29px;
-      }
-      .icon-circle {
-        width: 82px;
-        height: 82px;
-      }
-      .icon-circle svg { width: 43px; height: 43px; }
-      .message { font-size: 15px; }
+    @media (max-width: 420px) {
+      .card-body { padding: 30px 20px 22px; }
+      h1 { font-size: 22px; }
     }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
         animation-duration: .01ms !important;
         animation-iteration-count: 1 !important;
-        scroll-behavior: auto !important;
         transition-duration: .01ms !important;
       }
     }
@@ -366,89 +228,54 @@
 </head>
 
 <body class="unknown">
-  <header>
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none">
-          <path d="M12 2.8C9.2 7.1 5.7 10.7 5.7 15a6.3 6.3 0 0 0 12.6 0C18.3 10.7 14.8 7.1 12 2.8Z"
-            fill="currentColor"/>
-          <path d="M9 15.2c.1 1.7 1.2 2.8 2.9 3.1"
-            stroke="#087cf0" stroke-width="1.7" stroke-linecap="round"/>
+  <main class="card" aria-live="polite">
+    <div class="accent-bar"></div>
+
+    <div class="card-body">
+      <div class="icon" aria-hidden="true">
+        <svg id="status-icon" viewBox="0 0 32 32" fill="none">
+          <path class="draw" d="m8 17 6 6 11-12"/>
         </svg>
-      </span>
-      AquaDirect
-    </div>
-
-    <div class="secure-label">
-      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <path d="M12 3 19 6v5c0 4.7-2.9 8-7 10-4.1-2-7-5.3-7-10V6l7-3Z"
-          stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-        <path d="m9 12 2 2 4-4"
-          stroke="currentColor" stroke-width="1.8"
-          stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-      Secure checkout
-    </div>
-  </header>
-
-  <main>
-    <section class="content" aria-live="polite">
-      <div class="status-visual" aria-hidden="true">
-        <div class="orbit"></div>
-        <div class="icon-circle">
-          <svg id="status-icon" viewBox="0 0 48 48" fill="none">
-            <path class="draw" d="m12 25 8 8 17-18"/>
-          </svg>
-        </div>
       </div>
 
-      <div class="status-pill">
-        <span class="status-dot"></span>
-        <span id="status-label">Payment status</span>
-      </div>
-
+      <p class="status" id="status-label">Payment status</p>
       <h1 id="title">Checking your payment</h1>
       <p class="message" id="message">
-        Return to AquaDirect to check your order status.
+        Return to the app to check your order status.
       </p>
 
-      <div class="order-reference" id="order-reference" hidden>
-        Order reference
-        <strong id="order-id"></strong>
-      </div>
-
-      <div class="notice">
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.7"/>
-          <path d="M12 11v5m0-8h.01" stroke="currentColor"
-            stroke-width="2" stroke-linecap="round"/>
-        </svg>
-        <div id="notice-text">
-          <strong>Important:</strong> This page alone does not confirm your payment.
-          Your order status is verified by AquaDirect.
+      <dl class="details">
+        <div class="row">
+          <dt>Status</dt>
+          <dd class="state" id="state-text">Pending</dd>
         </div>
-      </div>
+        <div class="row" id="order-row" hidden>
+          <dt>Order reference</dt>
+          <dd class="ref" id="order-id"></dd>
+        </div>
+      </dl>
+
+      <p class="notice" id="notice-text"></p>
 
       <div class="actions">
-        <a class="return-link" id="return-link"
-          href="aquadirect://payment-return/home">
-          Return to AquaDirect
+        <a class="primary" id="return-link" href="aquadirect://payment-return/home">
+          <span id="button-text">Return to the app</span>
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M5 12h14m-6-6 6 6-6 6"
-              stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M5 12h14m-6-6 6 6-6 6" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </a>
-        <a class="secondary" id="secondary-link" href="aquadirect://payment-return/home">
-          Back to the app
-        </a>
       </div>
-    </section>
-  </main>
+    </div>
 
-  <footer>
-    AquaDirect · Water delivery made simple
-  </footer>
+    <div class="card-foot">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="5" y="11" width="14" height="9" rx="2" stroke="currentColor" stroke-width="2"/>
+        <path d="M8 11V8a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      Encrypted and secure payment processing
+    </div>
+  </main>
 
   <script>
     (() => {
@@ -456,98 +283,78 @@
       const status = (params.get("status") || "").toLowerCase();
       const orderId = params.get("order_id");
 
-      const body = document.body;
-      const title = document.getElementById("title");
-      const message = document.getElementById("message");
-      const icon = document.getElementById("status-icon");
-      const label = document.getElementById("status-label");
-      const notice = document.getElementById("notice-text");
-      const returnLink = document.getElementById("return-link");
-      const secondaryLink = document.getElementById("secondary-link");
+      const $ = (id) => document.getElementById(id);
 
-      // Preserve the app deep link and safely carry the order reference.
+      // Keep the app deep link and carry the order reference with it.
       const appUrl = new URL("aquadirect://payment-return/home");
       if (orderId) appUrl.searchParams.set("order_id", orderId);
-
-      const appHref = appUrl.toString();
-      returnLink.href = appHref;
-      secondaryLink.href = appHref;
+      $("return-link").href = appUrl.toString();
 
       if (orderId) {
-        document.getElementById("order-reference").hidden = false;
-        document.getElementById("order-id").textContent = orderId;
+        $("order-row").hidden = false;
+        $("order-id").textContent = orderId;
       }
 
       const icons = {
-        success: '<path class="draw" d="m12 25 8 8 17-18"/>',
-        failed: '<path class="draw" d="m15 15 18 18m0-18L15 33"/>',
-        cancel: '<path class="draw" d="M24 14v12m0 7h.01"/>',
-        unknown: '<path class="draw" d="M18 18c0-5 12-5 12 1 0 4-6 4-6 9m0 6h.01"/>'
+        success: '<path class="draw" d="m8 17 6 6 11-12"/>',
+        failed: '<path class="draw" d="m10 10 12 12m0-12L10 22"/>',
+        cancel: '<path class="draw" d="m10 10 12 12m0-12L10 22"/>',
+        unknown: '<path class="draw" d="M16 9v8m0 6h.01"/>'
       };
 
       const states = {
         success: {
           className: "success",
-          label: "Payment submitted",
-          title: "Payment submitted",
-          message: "Your checkout has returned to AquaDirect. Your payment is being verified, and your order status will update when confirmation arrives.",
-          notice: "<strong>What happens next?</strong> PayMongo's payment notification confirms the result. This page does not mark the order as paid by itself.",
-          button: "Return to AquaDirect"
+          label: "Payment received",
+          state: "Verifying",
+          title: "Thank you, your payment was submitted",
+          message: "Your payment is being confirmed by our payment provider. Your order will update automatically once confirmation arrives.",
+          notice: "<strong>What happens next:</strong> You'll see the confirmed status in the app. This page does not mark the order as paid by itself.",
+          button: "Return to the app",
+          docTitle: "Payment Submitted"
         },
         failed: {
           className: "failed",
-          label: "Payment failed",
-          title: "Payment unsuccessful",
-          message: "The checkout returned a failed status. Go back to AquaDirect to check your order and try another payment method if needed.",
-          notice: "<strong>No successful payment is confirmed here.</strong> Check your order in AquaDirect before attempting another payment.",
-          button: "Return to AquaDirect"
+          label: "Payment unsuccessful",
+          state: "Not completed",
+          title: "We couldn't complete your payment",
+          message: "No payment was confirmed. You have not been charged for this attempt. You can try again or choose another payment method.",
+          notice: "<strong>Next step:</strong> Return to the app, open your order and try again.",
+          button: "Return to the app",
+          docTitle: "Payment Unsuccessful"
         },
         cancel: {
           className: "cancel",
           label: "Checkout cancelled",
-          title: "Payment cancelled",
-          message: "You left the checkout before receiving a successful payment confirmation. Your order may still be available in AquaDirect.",
-          notice: "<strong>Need to try again?</strong> Return to AquaDirect and open your order to review the available payment options.",
-          button: "Back to your order"
+          state: "Cancelled",
+          title: "Your payment was cancelled",
+          message: "You left the checkout before paying, so no payment was made. Your order is still saved in the app.",
+          notice: "<strong>Changed your mind?</strong> Return to the app and open your order to choose a payment option.",
+          button: "Back to your order",
+          docTitle: "Payment Cancelled"
         },
         unknown: {
           className: "unknown",
           label: "Status unavailable",
+          state: "Unknown",
           title: "Let's check your order",
-          message: "We couldn't identify the checkout result from this page. Return to AquaDirect to check the latest status of your order.",
-          notice: "<strong>For your security:</strong> Only the verified payment status in AquaDirect should determine whether an order is paid.",
-          button: "Check order in AquaDirect"
+          message: "We couldn't read the checkout result from this page. Open the app to see the latest status of your order.",
+          notice: "<strong>For your security:</strong> only the verified status inside the app determines whether an order is paid.",
+          button: "Check order in the app",
+          docTitle: "Check Your Order"
         }
       };
 
-      const state = states[status] || states.unknown;
-      body.className = state.className;
-      label.textContent = state.label;
-      title.textContent = state.title;
-      message.textContent = state.message;
-      notice.innerHTML = state.notice;
-      returnLink.firstChild.textContent = state.button + " ";
-
-      // Use the matching animated SVG path.
-      icon.innerHTML = icons[state.className] || icons.unknown;
-
-      // Restart the icon animation when the state is rendered.
-      const path = icon.querySelector(".draw");
-      if (path) {
-        path.style.animation = "none";
-        void path.getBoundingClientRect();
-        path.style.animation = "";
-      }
-
-      if (status === "success") {
-        document.title = "Payment Submitted | AquaDirect";
-      } else if (status === "failed") {
-        document.title = "Payment Failed | AquaDirect";
-      } else if (status === "cancel") {
-        document.title = "Payment Cancelled | AquaDirect";
-      } else {
-        document.title = "Check Your Order | AquaDirect";
-      }
+      const s = states[status] || states.unknown;
+      document.body.className = s.className;
+      document.title = s.docTitle;
+      $("status-label").textContent = s.label;
+      $("state-text").textContent = s.state;
+      $("title").textContent = s.title;
+      $("message").textContent = s.message;
+      $("notice-text").innerHTML = s.notice;
+      $("button-text").textContent = s.button;
+      $("status-icon").innerHTML = icons[s.className];
     })();
   </script>
 </body>
