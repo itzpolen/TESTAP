@@ -100,7 +100,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
   final _searchController = TextEditingController();
   List<CustomerOrder> _orders = const [];
   bool _loading = true;
-  bool _refreshing = false;
   bool _clearingFinishedOrders = false;
   String? _error;
   RealtimeChannel? _ordersChannel;
@@ -180,8 +179,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
         _loading = true;
         _error = null;
       });
-    } else if (!silent) {
-      setState(() => _refreshing = true);
     }
     try {
       final orders = await SupabaseService.getCustomerOrders();
@@ -190,7 +187,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
       setState(() {
         _orders = orders;
         _loading = false;
-        _refreshing = false;
         _error = null;
       });
     } on Exception catch (error) {
@@ -198,7 +194,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
       final hadOrders = _orders.isNotEmpty;
       setState(() {
         _loading = false;
-        _refreshing = false;
         if (!hadOrders) _error = error.toString();
       });
       if (hadOrders && !silent) {
@@ -304,19 +299,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
                               letterSpacing: -.6,
                             ),
                           ),
-                        ),
-                        IconButton(
-                          tooltip: 'Refresh orders',
-                          onPressed: _refreshing ? null : _loadOrders,
-                          icon: _refreshing
-                              ? const SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(Icons.refresh_rounded),
                         ),
                       ],
                     ),

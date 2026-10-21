@@ -21,7 +21,6 @@ class _TrackScreenState extends State<TrackScreen> {
   String? _selectedOrderId;
   String? _error;
   bool _loading = true;
-  bool _refreshing = false;
   int _loadSequence = 0;
   Timer? _refreshTimer;
   RealtimeChannel? _ordersChannel;
@@ -77,19 +76,11 @@ class _TrackScreenState extends State<TrackScreen> {
     super.dispose();
   }
 
-  Future<void> _loadTracking({
-    bool showLoading = true,
-    bool showRefreshing = false,
-  }) async {
+  Future<void> _loadTracking({bool showLoading = true}) async {
     final sequence = ++_loadSequence;
     if (showLoading && mounted) {
       setState(() {
         _loading = true;
-        _error = null;
-      });
-    } else if (showRefreshing && mounted) {
-      setState(() {
-        _refreshing = true;
         _error = null;
       });
     }
@@ -103,25 +94,18 @@ class _TrackScreenState extends State<TrackScreen> {
             ? _selectedOrderId
             : tracking.firstOrNull?.order.id;
         _loading = false;
-        _refreshing = false;
         _error = null;
       });
     } on Exception catch (error) {
       if (!mounted || sequence != _loadSequence) return;
       setState(() {
         _loading = false;
-        _refreshing = false;
         _error = error.toString();
       });
-    } finally {
-      if (mounted && sequence == _loadSequence && _refreshing) {
-        setState(() => _refreshing = false);
-      }
     }
   }
 
-  Future<void> _refreshTracking() =>
-      _loadTracking(showLoading: false, showRefreshing: true);
+  Future<void> _refreshTracking() => _loadTracking(showLoading: false);
 
   CustomerDeliveryTracking? get _selectedTracking {
     for (final item in _tracking) {
@@ -174,17 +158,6 @@ class _TrackScreenState extends State<TrackScreen> {
                           ),
                         ],
                       ),
-                    ),
-                    IconButton(
-                      tooltip: 'Refresh tracking',
-                      onPressed: _refreshing ? null : _refreshTracking,
-                      icon: _refreshing
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.refresh_rounded),
                     ),
                   ],
                 ),
@@ -600,7 +573,8 @@ class _DeliveryDetails extends StatelessWidget {
     final riderPhone = tracking.riderPhone?.trim();
     final riderNumber = tracking.riderNumber;
     final riderLabel = [
-      if (riderNumber != null) 'Rider ${riderNumber.toString().padLeft(2, '0')}',
+      if (riderNumber != null)
+        'Rider ${riderNumber.toString().padLeft(2, '0')}',
       if (riderName?.isNotEmpty == true) riderName,
     ].join(' · ');
     return _TrackingCard(

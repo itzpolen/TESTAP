@@ -23,8 +23,9 @@ import 'station_screen.dart';
 // ============================================================
 
 const _pageBackground = Color(0xFFF5F8FC);
-const _headerStart = Color(0xFF0A2F6B);
-const _headerDark = Color(0xFF0563C1);
+// Same blue as the profile screen's header.
+const _headerStart = Color(0xFF2860E8);
+const _headerDark = Color(0xFF1743B5);
 const _navy = Color(0xFF0A2A5C);
 const _aqua = Color(0xFF1FB5C9);
 const _mint = Color(0xFF16A37F);
@@ -878,25 +879,21 @@ class _HomeHeader extends StatelessWidget {
         ),
         child: Stack(
           children: [
-            // One still highlight for depth. Nothing here moves.
+            // Soft ripples, the same as the profile header. Nothing here moves.
             Positioned(
-              right: -80,
-              top: -90,
-              child: IgnorePointer(
-                child: Container(
-                  width: 260,
-                  height: 260,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(
-                      colors: [
-                        Colors.white.withValues(alpha: .16),
-                        Colors.white.withValues(alpha: 0),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
+              right: -60,
+              top: -40 + top * .4,
+              child: const _SoftCircle(size: 220, alpha: .07),
+            ),
+            Positioned(
+              right: 10,
+              top: 30 + top * .4,
+              child: const _SoftCircle(size: 110, alpha: .08),
+            ),
+            Positioned(
+              left: -50,
+              bottom: 10,
+              child: const _SoftCircle(size: 150, alpha: .05),
             ),
             Padding(
               padding: EdgeInsets.fromLTRB(
@@ -2465,36 +2462,26 @@ class _HomeFooter extends StatelessWidget {
           style: _t(16, w: FontWeight.w800, ls: -.2),
         ),
         const SizedBox(height: 12),
-        // Three tiles side by side on normal phones, stacked on very narrow
-        // ones, so the text always has room.
         LayoutBuilder(
           builder: (context, constraints) {
-            final tiles = [
-              for (final (icon, color, title, subtitle) in _benefits)
-                _BenefitTile(
-                  icon: icon,
-                  color: color,
-                  title: title,
-                  subtitle: subtitle,
-                ),
-            ];
-            if (constraints.maxWidth < 320) {
-              return Column(
-                children: [
-                  for (var i = 0; i < tiles.length; i++) ...[
-                    if (i > 0) const SizedBox(height: 10),
-                    SizedBox(width: double.infinity, child: tiles[i]),
-                  ],
-                ],
-              );
+            if (constraints.maxWidth < 600) {
+              final tileWidth = math.min(constraints.maxWidth * .78, 260.0);
+              return _BenefitCarousel(tileWidth: tileWidth);
             }
             return IntrinsicHeight(
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  for (var i = 0; i < tiles.length; i++) ...[
+                  for (var i = 0; i < _benefits.length; i++) ...[
                     if (i > 0) const SizedBox(width: 10),
-                    Expanded(child: tiles[i]),
+                    Expanded(
+                      child: _BenefitTile(
+                        icon: _benefits[i].$1,
+                        color: _benefits[i].$2,
+                        title: _benefits[i].$3,
+                        subtitle: _benefits[i].$4,
+                      ),
+                    ),
                   ],
                 ],
               ),
@@ -2542,6 +2529,135 @@ class _HomeFooter extends StatelessWidget {
   );
 }
 
+/// The three benefit cards on narrow screens. They slide left one card at a
+/// time, rest for a moment, and loop for ever.
+///
+/// There is no controller. A timer only decides which card is in front, and
+/// AnimatedSlide does the movement. The row holds the cards twice: after the
+/// last slide the view shows the second copy, which looks exactly like the
+/// start, so it jumps back without animation and the loop has no visible seam.
+///
+/// Touching the cards pauses the loop. With "remove animations" turned on in
+/// the system settings, the cards stay still in a swipeable row.
+class _BenefitCarousel extends StatefulWidget {
+  const _BenefitCarousel({required this.tileWidth});
+
+  final double tileWidth;
+
+  @override
+  State<_BenefitCarousel> createState() => _BenefitCarouselState();
+}
+
+class _BenefitCarouselState extends State<_BenefitCarousel> {
+  static const _benefits = _HomeFooter._benefits;
+  static const _gap = 10.0;
+
+  /// One slide every 3.4 s: 0.7 s of movement, then a rest.
+  static const _every = Duration(milliseconds: 3400);
+  static const _slideTime = Duration(milliseconds: 700);
+
+  Timer? _timer;
+  int _index = 0;
+  bool _animate = true;
+  bool _holding = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _timer?.cancel();
+    if (_reduceMotion(context)) return;
+    _timer = Timer.periodic(_every, (_) => _advance());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _advance() {
+    if (!mounted || _holding) return;
+    if (_index < _benefits.length) {
+      setState(() => _index++);
+      return;
+    }
+    // Now showing the second copy. Jump back unseen, then slide on.
+    setState(() {
+      _animate = false;
+      _index = 0;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _animate = true;
+        _index = 1;
+      });
+    });
+  }
+
+  Widget _tile(int i) {
+    final data = _benefits[i % _benefits.length];
+    return SizedBox(
+      width: widget.tileWidth,
+      child: ExcludeSemantics(
+        // The second copy is only there for the loop.
+        excluding: i >= _benefits.length,
+        child: _BenefitTile(
+          icon: data.$1,
+          color: data.$2,
+          title: data.$3,
+          subtitle: data.$4,
+        ),
+      ),
+    );
+  }
+
+  Widget _row(int count) => IntrinsicHeight(
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < count; i++) ...[
+          if (i > 0) const SizedBox(width: _gap),
+          _tile(i),
+        ],
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final count = _benefits.length;
+    if (_reduceMotion(context)) {
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: _row(count),
+      );
+    }
+
+    final tile = widget.tileWidth;
+    final total = count * 2;
+    final rowWidth = total * tile + (total - 1) * _gap;
+    return Listener(
+      onPointerDown: (_) => _holding = true,
+      onPointerUp: (_) => _holding = false,
+      onPointerCancel: (_) => _holding = false,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        physics: const NeverScrollableScrollPhysics(),
+        child: AnimatedSlide(
+          // The offset is a fraction of the row's own width.
+          offset: Offset(-(_index * (tile + _gap)) / rowWidth, 0),
+          duration: _animate ? _slideTime : Duration.zero,
+          curve: Curves.easeInOutCubic,
+          child: _row(total),
+        ),
+      ),
+    );
+  }
+}
+
+/// One benefit card, laid out as before: the icon on the left, then the title
+/// and the description. A blue wave sits in the upper-right corner.
 class _BenefitTile extends StatelessWidget {
   const _BenefitTile({
     required this.icon,
@@ -2557,41 +2673,134 @@ class _BenefitTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(12),
     decoration: BoxDecoration(
       color: Colors.white,
       borderRadius: BorderRadius.circular(18),
       border: Border.all(color: _hairline),
     ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: .12),
-            shape: BoxShape.circle,
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(17),
+      child: Stack(
+        children: [
+          const Positioned(right: 0, top: 0, child: _WaveCorner()),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: .12),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: color, size: 18),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: _t(12.5, w: FontWeight.w800, h: 1.25),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  maxLines: 4,
+                  overflow: TextOverflow.ellipsis,
+                  style: _t(11, w: FontWeight.w500, c: textGray, h: 1.35),
+                ),
+              ],
+            ),
           ),
-          child: Icon(icon, color: color, size: 18),
+        ],
+      ),
+    ),
+  );
+}
+
+/// The blue wave in a card's upper-right corner: a pale wave behind and a
+/// smaller gradient wave in front, both with a flowing edge instead of a
+/// straight cut. The card's rounded corner clips it.
+class _WaveCorner extends StatelessWidget {
+  const _WaveCorner();
+
+  @override
+  Widget build(BuildContext context) => const SizedBox(
+    width: 76,
+    height: 60,
+    child: Stack(
+      fit: StackFit.expand,
+      children: [
+        ClipPath(
+          clipper: _WaveClipper(reach: 1, phase: .4, amplitude: 6),
+          child: ColoredBox(color: Color(0x292860E8)),
         ),
-        const SizedBox(height: 10),
-        Text(
-          title,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: _t(12.5, w: FontWeight.w800, h: 1.25),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          subtitle,
-          maxLines: 4,
-          overflow: TextOverflow.ellipsis,
-          style: _t(11, w: FontWeight.w500, c: textGray, h: 1.35),
+        ClipPath(
+          clipper: _WaveClipper(reach: .78, phase: 0, amplitude: 5),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topRight,
+                end: Alignment.bottomLeft,
+                colors: [_headerStart, _headerDark],
+                stops: [0, .75],
+              ),
+            ),
+            child: SizedBox.expand(),
+          ),
         ),
       ],
     ),
   );
+}
+
+/// Fills the upper-right corner up to a wavy diagonal edge. [reach] is how
+/// much of the box the shape covers, [phase] shifts the wave, and [amplitude]
+/// is how far the edge swings, in logical pixels.
+class _WaveClipper extends CustomClipper<Path> {
+  const _WaveClipper({
+    required this.reach,
+    required this.phase,
+    required this.amplitude,
+  });
+
+  final double reach;
+  final double phase;
+  final double amplitude;
+
+  @override
+  Path getClip(Size size) {
+    final left = size.width * (1 - reach);
+    final run = size.width - left;
+    final drop = size.height * reach;
+    final length = math.sqrt(run * run + drop * drop);
+    // Unit vector across the diagonal, pointing to the lower left.
+    final nx = -drop / length;
+    final ny = run / length;
+
+    final path = Path()..moveTo(left, 0);
+    const steps = 40;
+    for (var i = 1; i <= steps; i++) {
+      final t = i / steps;
+      // Waves fading out at both ends so the edge meets the card side cleanly.
+      final wave =
+          amplitude *
+          math.sin(t * math.pi * 3 + phase * math.pi) *
+          math.sin(t * math.pi);
+      path.lineTo(left + run * t + nx * wave, drop * t + ny * wave);
+    }
+    return path
+      ..lineTo(size.width, 0)
+      ..close();
+  }
+
+  @override
+  bool shouldReclip(covariant _WaveClipper oldClipper) =>
+      oldClipper.reach != reach ||
+      oldClipper.phase != phase ||
+      oldClipper.amplitude != amplitude;
 }
 
 // ============================================================
